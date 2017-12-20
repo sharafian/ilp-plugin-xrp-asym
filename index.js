@@ -80,6 +80,10 @@ class Plugin extends AbstractBtpPlugin {
         }] }
       })
 
+      // TODO: do the processes of channel establishment and client-channel
+      // establishment occur in here automatically (in the case that no channel
+      // exists) or do they happen in a separate script?
+
       this._prefix = info.prefix
       this._channel = info.channel
       this._clientChannel = info.clientChannel
@@ -91,6 +95,10 @@ class Plugin extends AbstractBtpPlugin {
         ))
 
       this._paychan = await this._api.getPaymentChannel(this._clientChannel)
+      // TODO: also load best claim from the crash-cache
+      this._bestClaim = {
+        amount: xrpToDrops(this._paychan.balance)
+      }
     })
 
     this._ws.on('message', (binaryMessage) => {
@@ -150,15 +158,19 @@ class Plugin extends AbstractBtpPlugin {
       const lastClaim = JSON.parse(primary.data.toString())
       const encodedClaim = encodeClaim(lastClaim.amount, this._channel)
 
-      try {
-        nacl.sign.detached.verify(
-          encodedClaim,
-          Buffer.from(lastClaim.signature, 'hex'),
-          this._keyPair.publicKey
-        )
-      } catch (err) {
-        debug('invalid claim signature for', amount)
-        return
+      // If they say we haven't sent them anything yet, it doesn't matter
+      // whether they possess a valid claim to say that.
+      if (lastClaim.amount !== '0') {
+        try {
+          nacl.sign.detached.verify(
+            encodedClaim,
+            Buffer.from(lastClaim.signature, 'hex'),
+            this._keyPair.publicKey
+          )
+        } catch (err) {
+          debug('invalid claim signature for', amount)
+          return
+        }
       }
 
       const amount = new BigNumber(lastClaim.amount).add(transfer.amount).toString()

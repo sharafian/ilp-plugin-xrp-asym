@@ -12,7 +12,7 @@ const base64url = require('base64url')
 const MIN_SETTLE_DELAY = 3600
 const bignum = require('bignum')
 
-const COST_OF_PAYCHAN = '5000000'
+const MIN_INCOMING_CHANNEL = '5000000'
 const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const OUTGOING_CHANNEL_DEFAULT_AMOUNT = Math.pow(10, 6) // 1 XRP
 const EMPTY_CONDITION = base64url(crypto.createHash('sha256').update(Buffer.alloc(32)).digest())
@@ -64,10 +64,10 @@ class Plugin extends AbstractBtpPlugin {
     this._currencyScale = 6
     this._modeInfiniteBalances = !!opts.debugInfiniteBalances
 
-    this._server = opts.server
+    this._xrpServer = opts.xrpServer
     this._secret = opts.secret
     this._address = opts.address
-    this._api = new RippleAPI({ server: this._server })
+    this._api = new RippleAPI({ server: this._xrpServer })
     this._bandwidth = opts.bandwidth || 1000
 
     this._log = opts._log || console
@@ -202,6 +202,8 @@ class Plugin extends AbstractBtpPlugin {
             let operation = Promise.resolve()
             if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
               operation = this._handleIncomingBtpPrepare(account, btpPacket)
+            } else if (btpPacket.type === BtpPacket.TYPE_MESSAGE) {
+              operation = this._handleBtpMessage(account, btpPacket)
             }
             debug('packet is authorized, forwarding to host')
             operation.then(() => {
@@ -296,37 +298,15 @@ class Plugin extends AbstractBtpPlugin {
     const primary = message.protocolData[0]
 
     if (primary && primary.protocolName === 'fund_channel') {
-      if (message.amount !== COST_OF_PAYCHAN) {
-        throw new Error('Fund channel transfer must give 5 XRP to cover reserve')
+      const incomingChannel = this._paychans.get(account)
+
+      if (new BigNumber(xrpToDrops(incomingChannel.amount)).lessThan(MIN_INCOMING_CHANNEL)) {
+        debug('denied outgoing paychan request; not enough has been escrowed')
+        throw new Error('not enough has been escrowed in channel; must put ' +
+          MIN_INCOMING_CHANNEL + ' drops on hold')
       }
 
-      if (message.executionCondition !== EMPTY_CONDITION) {
-        throw new Error('Fund channel transfer must have SHA256(0 * 32) as condition')
-      }
-
-      const secondary = message.protocolData[1]
-      if (secondary.protocolName !== 'fund_channel_claim') {
-        throw new Error('Fund channel transfer must come with an up front claim')
-      }
-
-      const lastClaim = this._getLastClaim(account)
-      const lastValue = new BigNumber(lastClaim.amount)
-
-      this._handleClaim(account, {
-        amount: lastValue.add(COST_OF_PAYCHAN),
-        signature: secondary.data.toString('hex').toUpperCase()
-      })
-
-      const balance = new BigNumber(this._balances.get(account) || 0)
-      const newBalance = balance.add(COST_OF_PAYCHAN)
-
-      const prepared = new BigNumber(this._ephemeral.get(account) || 0)
-      const newPrepared = prepared.add(COST_OF_PAYCHAN)
-
-      this._ephemeral.set(account, newPrepared.toString())
-      this._balances.set(account, newBalance.toString())
-
-      debug('an outgoing paychan has been bought for', account, '; establishing')
+      debug('an outgoing paychan has been authorized for', account, '; establishing')
       setImmediate(() => this._fundOutgoingChannel(account, primary))
 
       // TODO: should there be any revert to refund the cost if the establishment of a channel
@@ -364,10 +344,9 @@ class Plugin extends AbstractBtpPlugin {
     debug(`account ${account} debited ${prepare.amount} units, new balance ${newPrepared}`)
   }
 
-  async _handleOutgoingFulfill (transfer) {
+  _handleOutgoingFulfill (transfer) {
     const account = ilpAddressToAccount(this._prefix, transfer.to)
     const balanceKey = account + ':outgoing_balance'
-    await this._balances.load(balanceKey)
 
     const currentBalance = new BigNumber(this._balances.get(balanceKey) || 0)
     const newBalance = currentBalance.add(transfer.amount)
@@ -409,6 +388,19 @@ class Plugin extends AbstractBtpPlugin {
     this._balances.set(account, newBalance.toString())
 
     debug(`account ${account} finalized ${transfer.amount} units, new balance ${newBalance}`)
+  }
+
+  _getFulfillConditionProtocolData (transfer) {
+    const account = ilpAddressToAccount(this._prefix, transfer.from)
+    const claim = this._balances.get(account + ':claim') || JSON.stringify({
+      amount: '0'
+    })
+
+    return [{
+      protocolName: 'claim',
+      contentType: BtpPacket.MIME_APPLICATION_JSON,
+      data: Buffer.from(claim)
+    }]
   }
 
   _handleClaim (account, claim) {

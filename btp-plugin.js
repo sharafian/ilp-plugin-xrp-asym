@@ -380,6 +380,9 @@ class AbstractBtpPlugin extends EventEmitter {
         JSON.stringify(transfer))
     }
 
+    if (this._getFulfillConditionProtocolData) {
+      protocolData.push(...this._getFulfillConditionProtocolData(transfer))
+    }
 
     const response = await this._call(transfer.from, {
       type: BtpPacket.TYPE_FULFILL,
