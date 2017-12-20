@@ -77,9 +77,7 @@ class Plugin extends AbstractBtpPlugin {
     this._paychans = new Map()
     this._connections = new Map()
 
-    this.on('outgoing_fulfill', this._handleOutgoingFulfill.bind(this))
     this.on('incoming_fulfill', this._handleIncomingFulfill.bind(this))
-    this.on('_incoming_fulfill_response', this._handleIncomingFulfillResponse.bind(this))
     this.on('incoming_reject', this._handleIncomingReject.bind(this))
 
     if (this._modeInfiniteBalances) {
