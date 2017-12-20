@@ -17,17 +17,17 @@ const plugin = new IlpPluginXrpStateless({
 - [ ] verify channel details on connect
 - [ ] submit claim on close
 - [ ] cache claim somewhere in case of crash
-- [ ] load channel balance at connect to determine best claim
+- [x] load channel balance at connect to determine best claim
 - [ ] load cache at connect to determine best claim
 - [ ] issue fund transaction when channel is reaching threshold
 - [ ] make sure to save channel id with claims so the connector can't refuse to tell you it
-- [ ] create outgoing paychan (either automatically or separately as script)
+- [x] create outgoing paychan (either automatically or separately as script)
 - [ ] refactor shared functions into utils
 
 #### Server
 
-- [ ] supply last claim on incoming fulfill
+- [x] supply last claim on incoming fulfill
 - [ ] verify claim after outgoing fulfill
-- [ ] supply channel details as part of info
-- [ ] create outgoing paychan if there's an incoming one for certain amount
-- [ ] what to do before channel exists for info
+- [x] supply channel details as part of info
+- [x] create outgoing paychan if there's an incoming one for certain amount
+- [x] what to do before channel exists for info
