@@ -380,9 +380,8 @@ class AbstractBtpPlugin extends EventEmitter {
         JSON.stringify(transfer))
     }
 
-    this._safeEmit('incoming_fulfill', transfer, fulfillment, ilp)
 
-    await this._call(transfer.from, {
+    const response = await this._call(transfer.from, {
       type: BtpPacket.TYPE_FULFILL,
       requestId,
       data: {
@@ -391,6 +390,10 @@ class AbstractBtpPlugin extends EventEmitter {
         protocolData
       }
     })
+
+    if (this._handleIncomingFulfillResponse) {
+      this._handleIncomingFulfillResponse(transfer, response)
+    }
 
     this._incomingTransfers.delete(transferId)
 
@@ -406,7 +409,12 @@ class AbstractBtpPlugin extends EventEmitter {
 
     this._outgoingTransfers.delete(transferId)
 
-    return []
+    let protocolData = []
+    if (this._handleOutgoingFulfill) {
+      protocolData = this._handleOutgoingFulfill(transfer, data)
+    }
+
+    return 
   }
 
   async rejectIncomingTransfer (transferId, reason) {

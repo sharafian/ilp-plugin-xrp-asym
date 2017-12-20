@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { RippleAPI } = require('ripple-lib')
 const BtpPacket = require('btp-packet')
 const BigNumber = require('bignumber.js')
 const WebSocket = require('ws')
@@ -6,175 +7,206 @@ const assert = require('assert')
 const debug = require('debug')('ilp-plugin-mini-accounts')
 const AbstractBtpPlugin = require('./btp-plugin')
 const base64url = require('base64url')
+const INFO_REQUEST_ALL = 2
 
-function tokenToAccount (token) {
-  return base64url(crypto.createHash('sha256').update(token).digest('sha256'))
-}
-
-function ilpAddressToAccount (prefix, ilpAddress) {
-  if (ilpAddress.substr(0, prefix.length) !== prefix) {
-    throw new Error('ILP address (' + ilpAddress + ') must start with prefix (' + prefix + ')')
-  }
-
-  return ilpAddress.substr(prefix.length).split('.')[0]
-}
+const encodeClaim = (amount, id) => Buffer.concat([
+  Buffer.from('CLM\0'),
+  Buffer.from(id, 'hex'),
+  bignum(amount).toBuffer({
+    endian: 'big',
+    size: 8
+  })
+])
 
 class Plugin extends AbstractBtpPlugin {
   constructor (opts) {
     super()
-    this._prefix = opts.prefix
-    this._port = opts.port || 3000
-    this._wsOpts = opts.wsOpts || { port: this._port }
-    this._currencyScale = opts.currencyScale || 9
-    this._modeInfiniteBalances = !!opts.debugInfiniteBalances
+    this._currencyScale = 6
+    this._server = opts.server
+    this._unsecured = new BigNumber(0)
+    this._bandwidth = 200
+
+    // TODO: should use channel secret or xrp secret
+    this._secret = opts.secret
+    this._address = opts.address // TODO: can default from secret
+    this._xrpServer = opts.xrpServer // TODO: default here
+    this._api = new RippleAPI({ server: this._xrpServer })
 
     this._log = opts._log || console
-    this._wss = null
-    this._balances = new Map()
-    this._connections = new Map()
+    this._ws = null
 
-    this.on('outgoing_fulfill', this._handleOutgoingFulfill.bind(this))
     this.on('incoming_reject', this._handleIncomingReject.bind(this))
-
-    if (this._modeInfiniteBalances) {
-      this._log.warn('(!!!) granting all users infinite balances')
-    }
   }
 
-  connect () {
-    if (this._wss) return
+  async connect () {
+    if (this._ws) return
 
-    debug('listening on port ' + this._port)
-    const wss = this._wss = new WebSocket.Server(this._wsOpts)
-    wss.on('connection', (wsIncoming) => {
-      debug('got connection')
-      let token
-      let account
+    await this._api.connect()
 
-      // The first message must be an auth packet
-      // with the macaroon as the auth_token
-      let authPacket
-      wsIncoming.once('message', (binaryAuthMessage) => {
-        try {
-          authPacket = BtpPacket.deserialize(binaryAuthMessage)
-          assert.equal(authPacket.type, BtpPacket.TYPE_MESSAGE, 'First message sent over BTP connection must be auth packet')
-          assert(authPacket.data.protocolData.length >= 2, 'Auth packet must have auth and auth_token subprotocols')
-          assert.equal(authPacket.data.protocolData[0].protocolName, 'auth', 'First subprotocol must be auth')
-          for (let subProtocol of authPacket.data.protocolData) {
-            if (subProtocol.protocolName === 'auth_token') {
-              // TODO: Do some validation on the token
-              token = subProtocol.data
-              account = tokenToAccount(token)
+    const parsedServer = new URL(this._server)
+    const host = parsedServer.host // TODO: include path
+    const secret = parsedServer.password
+    const ws = this._ws = new WebSocket(host)
+    const protocolData = [{
+      protocolName: 'auth',
+      contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+      data: Buffer.from([])
+    }, {
+      protocolName: 'auth_username',
+      contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
+      data: Buffer.from('', 'utf8')
+    }, {
+      protocolName: 'auth_token',
+      contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
+      data: Buffer.from(secret, 'utf8')
+    }]
 
-              let connections = this._connections.get(account)
-              if (!connections) {
-                this._connections.set(account, connections = new Set())
-              }
+    this._ws.on('open', async () => {
+      debug('connected to server')
 
-              connections.add(wsIncoming)
-            }
-          }
-          assert(token, 'auth_token subprotocol is required')
-
-          wsIncoming.send(BtpPacket.serializeResponse(authPacket.requestId, []))
-        } catch (err) {
-          if (authPacket) {
-            const errorResponse = BtpPacket.serializeError({
-              code: 'F00',
-              name: 'NotAcceptedError',
-              data: err.message,
-              triggeredAt: new Date().toISOString()
-            }, authPacket.requestId, [])
-            wsIncoming.send(errorResponse)
-          }
-          wsIncoming.close()
-          return
-        }
-
-        debug('connection authenticated')
-
-        wsIncoming.on('message', (binaryMessage) => {
-          let btpPacket
-          try {
-            btpPacket = BtpPacket.deserialize(binaryMessage)
-          } catch (err) {
-            wsIncoming.close()
-          }
-          debug(`account ${account}: processing btp packet ${JSON.stringify(btpPacket)}`)
-          try {
-            if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
-              this._handleIncomingBtpPrepare(account, btpPacket)
-            }
-            debug('packet is authorized, forwarding to host')
-            this._handleIncomingBtpPacket(this._prefix + account, btpPacket)
-          } catch (err) {
-            debug('btp packet not accepted', err)
-            const errorResponse = BtpPacket.serializeError({
-              code: 'F00',
-              name: 'NotAcceptedError',
-              triggeredAt: new Date().toISOString(),
-              data: err.message
-            }, btpPacket.requestId, [])
-            wsIncoming.send(errorResponse)
-          }
-        })
+      await this._call(null, {
+        type: BtpPacket.TYPE_MESSAGE,
+        requestId,
+        data: { protocolData }
       })
+
+      const info = await this._call(null, {
+        type: BtpPacket.TYPE_MESSAGE,
+        requestId,
+        data: { protocolData: [{
+          protocolName: 'info',
+          contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+          data: Buffer.from([ INFO_REQUEST_ALL ])
+        }] }
+      })
+
+      this._prefix = info.prefix
+      this._channel = info.channel
+      this._clientChannel = info.clientChannel
+      this._peerAddress = info.address
+      this._keyPair = nacl.sign.keyPair
+        .fromSeed(hmac(
+          this._secret,
+          'ilp-plugin-xrp-stateless' + this._peerAddress
+        ))
+
+      this._paychan = await this._api.getPaymentChannel(this._channel)
+    })
+
+    this._ws.on('message', (binaryMessage) => {
+      let btpPacket
+      try {
+        btpPacket = BtpPacket.deserialize(binaryMessage)
+      } catch (err) {
+        wsIncoming.close()
+      }
+      try {
+        if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
+          this._handleIncomingBtpPrepare(btpPacket)
+        }
+        debug('packet is authorized, forwarding to host')
+        this._handleIncomingBtpPacket(this._prefix, btpPacket)
+      } catch (err) {
+        debug('btp packet not accepted', err)
+        const errorResponse = BtpPacket.serializeError({
+          code: 'F00',
+          name: 'NotAcceptedError',
+          triggeredAt: new Date().toISOString(),
+          data: err.message
+        }, btpPacket.requestId, [])
+        wsIncoming.send(errorResponse)
+      }
     })
 
     return null
   }
 
   disconnect () {
-    if (this._wss) {
+    if (this._ws) {
       return new Promise(resolve => {
-        this._wss.close(resolve)
-        this._wss = null
+        this._ws.close(resolve)
+        this._ws = null
       })
     }
   }
 
   isConnected () {
-    return !!this._wss
+    return !!this._ws
   }
 
-  _handleIncomingBtpPrepare (account, btpPacket) {
+  _handleIncomingBtpPrepare (btpPacket) {
     const prepare = btpPacket.data
-    if (prepare.protocolData.length < 1 || prepare.protocolData[0].protocolName !== 'ilp') {
-      throw new Error('ILP packet is required')
+    const newUnsecured = this._unsecured.add(prepare.amount)
+
+    if (newUnsecured.greaterThan(this._bandwidth)) {
+      throw new Error('Insufficient bandwidth, have: ' + this._bandwidth + ' need: ' + newUnsecured)
     }
-    // const ilp = IlpPacket.deserializeIlpPayment(prepare.protocolData[0].data)
-
-    const currentBalance = this._balances.get(account) || new BigNumber(0)
-
-    const newBalance = currentBalance.sub(prepare.amount)
-
-    if (newBalance.lessThan(0) && !this._modeInfiniteBalances) {
-      throw new Error('Insufficient funds, have: ' + currentBalance + ' need: ' + prepare.amount)
-    }
-
-    this._balances.set(account, newBalance)
-
-    debug(`account ${account} debited ${prepare.amount} units, new balance ${newBalance}`)
   }
 
-  _handleOutgoingFulfill (transfer) {
-    const account = ilpAddressToAccount(this._prefix, transfer.to)
-    const currentBalance = this._balances.get(account) || new BigNumber(0)
-    const newBalance = currentBalance.add(transfer.amount)
+  _handleOutgoingFulfill (transfer, btpData) {
+    const primary = btpData.protocolData[0]
 
-    this._balances.set(account, newBalance)
+    if (primary.protocolName === 'claim') {
+      const lastClaim = JSON.parse(primary.data.toString())
+      const encodedClaim = encodeClaim(lastClaim.amount, this._clientChannel)
 
-    debug(`account ${account} credited ${transfer.amount} units, new balance ${newBalance}`)
+      try {
+        nacl.sign.detached.verify(
+          encodedClaim,
+          Buffer.from(lastClaim.signature, 'hex'),
+          this._keyPair.publicKey
+        )
+      } catch (err) {
+        debug('invalid claim signature for', amount)
+        return
+      }
+
+      const amount = new BigNumber(lastClaim.amount).add(transfer.amount).toString()
+      const newClaimEncoded = encodeClaim(amount, this._clientChannel)
+      const signature = Buffer
+        .from(nacl.sign.detached(newClaimEncoded, this._keyPair.secretKey))
+        .toString('hex')
+        .toUpperCase()
+
+      return [{
+        protocolName: 'claim',
+        contentType: BtpPacket.MIME_APPLICATION_JSON,
+        data: Buffer.from(JSON.stringify({ amount, signature }))
+      }]
+    }
+  }
+
+  _handleIncomingFulfillResponse (transfer, response) {
+    const primary = response.protocolData[0]
+
+    if (primary.protocolName === 'claim') {
+      const nextAmount = this._bestClaim.amount.add(transfer.amount)
+      const { amount, signature } = JSON.parse(primary.data.toString())
+      const encodedClaim = encodeClaim(amount, this._channel)
+
+      if (nextAmount.notEquals(amount)) {
+        debug('expected claim for', nextAmount.toString(), 'got', amount)
+        return
+      }
+
+      try {
+        nacl.sign.detached.verify(
+          encodedClaim,
+          Buffer.from(signature, 'hex'),
+          Buffer.from(this._paychan.publicKey.substring(2), 'hex')
+        )
+      } catch (err) {
+        debug('invalid claim signature for', amount)
+        return
+      }
+
+      this._unsecured = this._unsecured.sub(transfer.amount)
+      this._bestClaim = { amount, signature }
+    }
   }
 
   _handleIncomingReject (transfer) {
-    const account = ilpAddressToAccount(this._prefix, transfer.from)
-    const currentBalance = this._balances.get(account) || new BigNumber(0)
-    const newBalance = currentBalance.add(transfer.amount)
-
-    this._balances.set(account, newBalance)
-
-    debug(`account ${account} credited ${transfer.amount} units, new balance ${newBalance}`)
+    this._unsecured = this._unsecured.sub(transfer.amount)
   }
 
   getAccount () {
@@ -190,30 +222,11 @@ class Plugin extends AbstractBtpPlugin {
   }
 
   async _handleOutgoingBtpPacket (to, btpPacket) {
-    if (to.substring(0, this._prefix.length) !== this._prefix) {
-      throw new Error('Invalid destination "' + to + '", must start with prefix: ' + this._prefix)
+    try { 
+      await new Promise(resolve => this._ws.send(BtpPacket.serialize(btpPacket), resolve))
+    } catch (e) {
+      debug('unable to send btp message to client: ' + errorInfo, 'btp packet:', JSON.stringify(btpPacket))
     }
-
-    const account = ilpAddressToAccount(this._prefix, to)
-
-    const connections = this._connections.get(account)
-
-    if (!connections) {
-      throw new Error('No clients connected for account ' + account)
-    }
-
-    const results = Array.from(connections).map(wsIncoming => {
-      const result = new Promise(resolve => wsIncoming.send(BtpPacket.serialize(btpPacket), resolve))
-
-      result.catch(err => {
-        const errorInfo = (typeof err === 'object' && err.stack) ? err.stack : String(err)
-        debug('unable to send btp message to client: ' + errorInfo, 'btp packet:', JSON.stringify(btpPacket))
-      })
-    })
-
-    await Promise.all(results)
-
-    return null
   }
 }
 
