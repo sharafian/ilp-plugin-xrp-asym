@@ -29,6 +29,12 @@ const encodeClaim = (amount, id) => Buffer.concat([
   })
 ])
 
+function hmac (key, message) {
+  const h = crypto.createHmac('sha256', key)
+  h.update(message)
+  return h.digest()
+}
+
 const computeChannelId = (src, dest, sequence) => {
   const preimage = Buffer.concat([
     Buffer.from('\0x', 'ascii'),
@@ -134,7 +140,8 @@ class Plugin extends AbstractBtpPlugin {
     return {
       channel,
       clientChannel,
-      address
+      address,
+      account: from
     }
   }
 
@@ -232,8 +239,6 @@ class Plugin extends AbstractBtpPlugin {
             let operation = Promise.resolve()
             if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
               operation = this._handleIncomingBtpPrepare(account, btpPacket)
-            } else if (btpPacket.type === BtpPacket.TYPE_MESSAGE) {
-              operation = this._handleBtpMessage(account, btpPacket)
             }
             debug('packet is authorized, forwarding to host')
             operation.then(() => {
@@ -275,7 +280,7 @@ class Plugin extends AbstractBtpPlugin {
 
     const existing = this._balances.get(account + ':client_channel')
     if (existing) {
-      return 
+      return existing
     }
 
     this._balances.setCache(account + ':client_channel', true)
@@ -303,49 +308,39 @@ class Plugin extends AbstractBtpPlugin {
       return
     }
 
-    await new Promise((resolve) => {
+    return new Promise((resolve) => {
       const handleTransaction = (ev) => {
         if (ev.transaction.SourceTag !== txTag) return
         if (ev.transaction.Account !== this._address) return
 
-        this._balances.set(account + ':outgoing_balance', '0')
-        this._balances.set(account + ':client_channel', computeChannelId(
+        const clientChannelId = computeChannelId(
           ev.transaction.Account,
           ev.transaction.Destination,
-          ev.transaction.Sequence))
+          ev.transaction.Sequence)
+
+        this._balances.set(account + ':outgoing_balance', '0')
+        this._balances.set(account + ':client_channel', clientChannelId)
 
         setImmediate(() => this._api.connection
           .removeListener('transaction', handleTransaction))
-        resolve()
+        resolve(clientChannelId)
       }
 
       this._api.connection.on('transaction', handleTransaction)
     })
   }
 
-  async _handleBtpMessage (account, btpPacket) {
-    const message = btpPacket.data
-    const primary = message.protocolData[0]
+  async _handleBtpMessage (from, message) {
+    const account = ilpAddressToAccount(this._prefix, from)
+    const protocols = message.protocolData
+    if (!protocols.length) return
 
-    if (!primary) return
-    if (primary.protocolName === 'fund_channel') {
-      const incomingChannel = this._paychans.get(account)
+    const fundChannel = protocols.filter(p => p.protocolName === 'fund_channel')[0]
+    const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
 
-      if (new BigNumber(xrpToDrops(incomingChannel.amount)).lessThan(MIN_INCOMING_CHANNEL)) {
-        debug('denied outgoing paychan request; not enough has been escrowed')
-        throw new Error('not enough has been escrowed in channel; must put ' +
-          MIN_INCOMING_CHANNEL + ' drops on hold')
-      }
-
-      debug('an outgoing paychan has been authorized for', account, '; establishing')
-      setImmediate(() => this._fundOutgoingChannel(account, primary))
-
-      // TODO: should the channel subprotocol be merged with fund_channel, such that the
-      // connector will see that enough funds have been escrowed to them and then they can
-      // open a counter-channel?
-    } else if (primary.protocolName === 'channel') {
+    if (channelProtocol) {
       debug('got message for incoming channel on account', account)
-      const channel = primary.data
+      const channel = channelProtocol.data
         .toString('hex')
         .toUpperCase()
 
@@ -365,6 +360,39 @@ class Plugin extends AbstractBtpPlugin {
       this._paychans.set(account, paychan)
       this._balances.set(account + ':channel', channel)
       debug('registered payment channel for', account)
+    }
+
+    if (fundChannel) {
+      const incomingChannel = this._paychans.get(account)
+
+      if (new BigNumber(xrpToDrops(incomingChannel.amount)).lessThan(MIN_INCOMING_CHANNEL)) {
+        debug('denied outgoing paychan request; not enough has been escrowed')
+        throw new Error('not enough has been escrowed in channel; must put ' +
+          MIN_INCOMING_CHANNEL + ' drops on hold')
+      }
+
+      debug('an outgoing paychan has been authorized for', account, '; establishing')
+      const clientChannelId = await this._fundOutgoingChannel(account, fundChannel)
+
+      // TODO: should the channel subprotocol be merged with fund_channel, such that the
+      // connector will see that enough funds have been escrowed to them and then they can
+      // open a counter-channel?
+
+      return [{
+        protocolName: 'fund_channel',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: Buffer.from(clientChannelId, 'hex')
+      }]
+    }
+    return []
+  }
+
+  _handleOutgoingPrepare (transfer) {
+    const account = ilpAddressToAccount(this._prefix, transfer.to)
+    const clientChannel = this._balances.get(account + ':client_channel')
+
+    if (!clientChannel) {
+      throw new Error('No client channel established for account ' + account)
     }
   }
 

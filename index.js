@@ -14,6 +14,9 @@ const OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP = '10' // TODO: something lower?
 const MIN_SETTLE_DELAY = 3600
 const nacl = require('tweetnacl')
 const bignum = require('bignum')
+const DROPS_PER_XRP = 1000000
+const dropsToXrp = (drops) => new BigNumber(drops).div(DROPS_PER_XRP).toString()
+const xrpToDrops = (xrp) => new BigNumber(xrp).mul(DROPS_PER_XRP).toString()
 
 function hmac (key, message) {
   const h = crypto.createHmac('sha256', key)
@@ -178,6 +181,7 @@ class Plugin extends AbstractBtpPlugin {
         const info = JSON.parse(infoResponse.protocolData[0].data.toString())
         debug('got info:', info)
 
+        this._account = info.account
         this._prefix = info.prefix
         this._channel = info.channel
         this._clientChannel = info.clientChannel
@@ -188,6 +192,48 @@ class Plugin extends AbstractBtpPlugin {
             'ilp-plugin-xrp-stateless' + this._peerAddress
           ))
 
+        // TODO: is this an attack vector, if not telling the plugin about their channel
+        // causes them to open another channel?
+
+        const channelProtocolData = []
+        if (!this._channel) {
+          this._channel = await this._createOutgoingChannel()
+          // TODO: can we call 'channel' and 'fund_channel' here at the same time?
+
+          channelProtocolData.push({
+            protocolName: 'channel',
+            contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+            data: Buffer.from(this._channel, 'hex')
+          })
+        }
+
+        if (!this._clientChannel) {
+          debug('no client channel has been established; requesting')
+          channelProtocolData.push({
+            protocolName: 'fund_channel',
+            contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
+            data: Buffer.from(this._address)
+          })
+        }
+
+        if (channelProtocolData.length) {
+          const channelResponse = await this._call(null, {
+            type: BtpPacket.TYPE_MESSAGE,
+            requestId: await _requestId(),
+            data: { protocolData: channelProtocolData }
+          })
+
+          if (!this._clientChannel) {
+            const fundChannelResponse = channelResponse
+              .protocolData
+              .filter(p => p.protocolName === 'fund_channel')[0]
+
+            this._clientChannel = fundChannelResponse.data
+              .toString('hex')
+              .toUpperCase()
+          }
+        }
+
         // TODO: should this occur as part of info or should the connector send us a
         // separate message to inform us that they have a channel to us?
         if (this._clientChannel) {
@@ -197,22 +243,6 @@ class Plugin extends AbstractBtpPlugin {
           this._bestClaim = {
             amount: xrpToDrops(this._paychan.balance)
           }
-        }
-
-        // TODO: is this an attack vector, if not telling the plugin about their channel
-        // causes them to open another channel?
-        if (!this._channel) {
-          this._channel = await this._createOutgoingChannel()
-          // TODO: can we call 'channel' and 'fund_channel' here at the same time?
-          await this._call(null, {
-            type: BtpPacket.TYPE_MESSAGE,
-            requestId: await _requestId(),
-            data: { protocolData: [{
-              protocolName: 'channel',
-              contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-              data: Buffer.from(this._channel, 'hex')
-            }] }
-          })
         }
 
         // finished the connect process
@@ -314,11 +344,11 @@ class Plugin extends AbstractBtpPlugin {
     const primary = response.protocolData[0]
 
     if (primary.protocolName === 'claim') {
-      const nextAmount = this._bestClaim.amount.add(transfer.amount)
+      const nextAmount = new BigNumber(this._bestClaim.amount).add(transfer.amount)
       const { amount, signature } = JSON.parse(primary.data.toString())
       const encodedClaim = encodeClaim(amount, this._clientChannel)
 
-      if (nextAmount.notEquals(amount)) {
+      if (nextAmount.greaterThan(amount)) {
         debug('expected claim for', nextAmount.toString(), 'got', amount)
         return
       }
@@ -344,7 +374,7 @@ class Plugin extends AbstractBtpPlugin {
   }
 
   getAccount () {
-    return this._prefix + 'server'
+    return this._account
   }
 
   getInfo () {
@@ -356,7 +386,6 @@ class Plugin extends AbstractBtpPlugin {
   }
 
   async _handleOutgoingBtpPacket (to, btpPacket) {
-    console.log('SENDING', btpPacket, 'to', to)
     try { 
       await new Promise(resolve => this._ws.send(BtpPacket.serialize(btpPacket), resolve))
     } catch (e) {

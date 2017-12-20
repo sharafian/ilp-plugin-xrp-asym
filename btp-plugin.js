@@ -208,6 +208,10 @@ class AbstractBtpPlugin extends EventEmitter {
 
     this._outgoingTransfers.set(transfer.id, transfer)
 
+    if (this._handleOutgoingPrepare) {
+      this._handleOutgoingPrepare(transfer)
+    }
+
     this._safeEmit('outgoing_prepare', transfer)
 
     await this._call(transfer.to, {
@@ -332,8 +336,8 @@ class AbstractBtpPlugin extends EventEmitter {
         }]
       } else if (protocolMap.custom) {
         // Don't throw -- this message will be emitted.
-      } else {
-        return
+      } else if (this._handleBtpMessage) {
+        return this._handleBtpMessage(from, data)
       }
     }
 
