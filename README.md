@@ -1,11 +1,20 @@
 # ILP Plugin XRP Stateless
 > An XRP paychan plugin that allows you to be a stateless client
 
+```js
+const plugin = new IlpPluginXrpStateless({
+  server: 'btp+wss://:secret@example.com',
+  secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
+  address: 'rsxjtFn93z2M4eMyjFaMFiHwzeH1K9xK3K',
+  xrpServer: 'wss://s.altnet.rippletest.net:51233'
+})
+```
 
 #### Client
 
-- [ ] sign higher version of last claim on outgoing fulfill
-- [ ] verify claim on incoming fulfill
+- [x] sign higher version of last claim on outgoing fulfill
+- [x] verify claim on incoming fulfill
+- [ ] verify channel details on connect
 - [ ] submit claim on close
 - [ ] cache claim somewhere in case of crash
 - [ ] load channel balance at connect to determine best claim
