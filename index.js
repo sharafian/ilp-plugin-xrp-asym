@@ -90,7 +90,7 @@ class Plugin extends AbstractBtpPlugin {
           'ilp-plugin-xrp-stateless' + this._peerAddress
         ))
 
-      this._paychan = await this._api.getPaymentChannel(this._channel)
+      this._paychan = await this._api.getPaymentChannel(this._clientChannel)
     })
 
     this._ws.on('message', (binaryMessage) => {
@@ -148,7 +148,7 @@ class Plugin extends AbstractBtpPlugin {
 
     if (primary.protocolName === 'claim') {
       const lastClaim = JSON.parse(primary.data.toString())
-      const encodedClaim = encodeClaim(lastClaim.amount, this._clientChannel)
+      const encodedClaim = encodeClaim(lastClaim.amount, this._channel)
 
       try {
         nacl.sign.detached.verify(
@@ -162,7 +162,7 @@ class Plugin extends AbstractBtpPlugin {
       }
 
       const amount = new BigNumber(lastClaim.amount).add(transfer.amount).toString()
-      const newClaimEncoded = encodeClaim(amount, this._clientChannel)
+      const newClaimEncoded = encodeClaim(amount, this._channel)
       const signature = Buffer
         .from(nacl.sign.detached(newClaimEncoded, this._keyPair.secretKey))
         .toString('hex')
@@ -182,7 +182,7 @@ class Plugin extends AbstractBtpPlugin {
     if (primary.protocolName === 'claim') {
       const nextAmount = this._bestClaim.amount.add(transfer.amount)
       const { amount, signature } = JSON.parse(primary.data.toString())
-      const encodedClaim = encodeClaim(amount, this._channel)
+      const encodedClaim = encodeClaim(amount, this._clientChannel)
 
       if (nextAmount.notEquals(amount)) {
         debug('expected claim for', nextAmount.toString(), 'got', amount)
