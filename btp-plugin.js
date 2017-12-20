@@ -17,7 +17,7 @@ const InvalidFieldsError = errors.InvalidFieldsError
 const AlreadyRolledBackError = errors.AlreadyRolledBackError
 const RequestHandlerAlreadyRegisteredError = errors.RequestHandlerAlreadyRegisteredError
 
-const int64 = require('./int64')
+const int64 = require('./long')
 
 const DEFAULT_TIMEOUT = 5000
 const namesToCodes = {
