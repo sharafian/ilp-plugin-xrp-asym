@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const addressCodec = require('ripple-address-codec')
 const nacl = require('tweetnacl')
 const { RippleAPI } = require('ripple-lib')
 const BtpPacket = require('btp-packet')
@@ -27,6 +28,22 @@ const encodeClaim = (amount, id) => Buffer.concat([
     size: 8
   })
 ])
+
+const computeChannelId = (src, dest, sequence) => {
+  const preimage = Buffer.concat([
+    Buffer.from('\0x', 'ascii'),
+    Buffer.from(addressCodec.decodeAccountID(src)),
+    Buffer.from(addressCodec.decodeAccountID(dest)),
+    bignum(sequence).toBuffer({ endian: 'big', size: 4 })
+  ])
+
+  return crypto.createHash('sha512')
+    .update(preimage)
+    .digest()
+    .slice(0, 32) // first half sha512
+    .toString('hex')
+    .toUpperCase()
+}
 
 const randomTag = () => bignum.fromBuffer(crypto.randomBytes(4), {
   endian: 'big',
@@ -85,10 +102,50 @@ class Plugin extends AbstractBtpPlugin {
     }
   }
 
+  _validatePaychanDetails (paychan) {
+    const settleDelay = paychan.settleDelay
+    if (settleDelay < MIN_SETTLE_DELAY) {
+      debug(`incoming payment channel has a too low settle delay of ${settleDelay.toString()}` +
+        ` seconds. Minimum settle delay is ${MIN_SETTLE_DELAY} seconds.`)
+      throw new Error('settle delay of incoming payment channel too low')
+    }
+
+    if (paychan.cancelAfter) {
+      checkChannelExpiry(paychan.cancelAfter)
+    }
+
+    if (paychan.expiration) {
+      checkChannelExpiry(paychan.expiration)
+    }
+
+    if (paychan.destination !== this._address) {
+      debug('incoming channel destination is not our address: ' +
+        paychan.destination)
+      throw new Error('Channel destination address wrong')
+    }
+  }
+
+  _extraInfo (from) {
+    const account = ilpAddressToAccount(this._prefix, from)
+    const channel = this._balances.get(account + ':channel')
+    const clientChannel = this._balances.get(account + ':client_channel')
+    const address = this._address
+    
+    return {
+      channel,
+      clientChannel,
+      address
+    }
+  }
+
   async connect () {
     if (this._wss) return
 
     await this._api.connect()
+    await this._api.connection.request({
+      command: 'subscribe',
+      accounts: [ this._address ]
+    })
 
     debug('listening on port ' + this._port)
     const wss = this._wss = new WebSocket.Server(this._wsOpts)
@@ -119,53 +176,26 @@ class Plugin extends AbstractBtpPlugin {
               }
 
               connections.add(wsIncoming)
-            } else if (subProtocol.protocolName === 'channel') {
-              channel = subProtocol.data.toString('hex').toUpperCase()
             }
           }
 
           assert(token, 'auth_token subprotocol is required')
-          assert(channel, 'channel subprotocol is required')
 
           const channelKey = account + ':channel'
           await this._balances.load(channelKey)
           const existingChannel = this._balances.get(channelKey)
 
-          if (existingChannel && existingChannel !== channel) {
-            throw new Error(`existing channel ${existingChannel} does not match subprotocol channel ${channel}`)
-          } else {
-            this._balances.set(channelKey, channel)
-          }
-
-          // TODO: DoS vector by requesting paychan on user connect?
-          const paychan = await this._api.getPaymentChannel(channel)
           await this._balances.load(account)
           await this._balances.load(account + ':claim')
 
-          const settleDelay = paychan.settleDelay
-          if (settleDelay < MIN_SETTLE_DELAY) {
-            debug(`incoming payment channel has a too low settle delay of ${settleDelay.toString()}` +
-              ` seconds. Minimum settle delay is ${MIN_SETTLE_DELAY} seconds.`)
-            throw new Error('settle delay of incoming payment channel too low')
-          }
-
-          if (paychan.cancelAfter) {
-            checkChannelExpiry(paychan.cancelAfter)
-          }
-
-          if (paychan.expiration) {
-            checkChannelExpiry(paychan.expiration)
-          }
-
-          if (paychan.destination !== this._address) {
-            debug('incoming channel destination is not our address: ' +
-              paychan.destination)
-            throw new Error('Channel destination address wrong')
+          if (existingChannel) {
+            // TODO: DoS vector by requesting paychan on user connect?
+            const paychan = await this._api.getPaymentChannel(existingChannel)
+            this._validatePaychanDetails(paychan)
+            this._paychans.set(account, paychan)
           }
 
           this._ephemeral.set(account, this._balances.get(account))
-          this._paychans.set(account, paychan)
-
           wsIncoming.send(BtpPacket.serializeResponse(authPacket.requestId, []))
         } catch (err) {
           if (authPacket) {
@@ -297,7 +327,8 @@ class Plugin extends AbstractBtpPlugin {
     const message = btpPacket.data
     const primary = message.protocolData[0]
 
-    if (primary && primary.protocolName === 'fund_channel') {
+    if (!primary) return
+    if (primary.protocolName === 'fund_channel') {
       const incomingChannel = this._paychans.get(account)
 
       if (new BigNumber(xrpToDrops(incomingChannel.amount)).lessThan(MIN_INCOMING_CHANNEL)) {
@@ -309,12 +340,41 @@ class Plugin extends AbstractBtpPlugin {
       debug('an outgoing paychan has been authorized for', account, '; establishing')
       setImmediate(() => this._fundOutgoingChannel(account, primary))
 
-      // TODO: should there be any revert to refund the cost if the establishment of a channel
-      // somehow fails?
+      // TODO: should the channel subprotocol be merged with fund_channel, such that the
+      // connector will see that enough funds have been escrowed to them and then they can
+      // open a counter-channel?
+    } else if (primary.protocolName === 'channel') {
+      debug('got message for incoming channel on account', account)
+      const channel = primary.data
+        .toString('hex')
+        .toUpperCase()
+
+      const channelKey = account + ':channel'
+      const existingChannel = this._balances.get(channelKey)
+
+      if (existingChannel && existingChannel !== channel) {
+        throw new Error(`there is already an existing channel on this account
+          and it doesn't match the 'channel' protocolData`)
+      }
+
+      // Because this reloads channel details even if the channel exists,
+      // we can use it to refresh the channel details after extra funds are
+      // added
+      const paychan = await this._api.getPaymentChannel(channel)
+      this._validatePaychanDetails(paychan)
+      this._paychans.set(account, paychan)
+      this._balances.set(account + ':channel', channel)
+      debug('registered payment channel for', account)
     }
   }
 
   async _handleIncomingBtpPrepare (account, btpPacket) {
+    const paychan = this._paychans.get(account)
+    if (!paychan) {
+      throw new Error(`Incoming traffic won't be accepted until a channel to
+        the connector is established`)
+    }
+
     const prepare = btpPacket.data
     const primary = prepare.protocolData[0]
     if (!primary || primary.protocolName !== 'ilp') {
@@ -325,7 +385,6 @@ class Plugin extends AbstractBtpPlugin {
     const prepared = new BigNumber(this._ephemeral.get(account) || 0)
     const lastClaim = this._getLastClaim(account)
     const lastValue = new BigNumber(lastClaim.amount)
-    const paychan = this._paychans.get(account)
 
     const newPrepared = prepared.add(prepare.amount)
     const unsecured = newPrepared.sub(lastValue)
@@ -376,7 +435,7 @@ class Plugin extends AbstractBtpPlugin {
       data: Buffer.from(JSON.stringify({
         amount: newBalance.toString(),
         signature: Buffer.from(signature).toString('hex')
-      })
+      }))
     }]
   }
 

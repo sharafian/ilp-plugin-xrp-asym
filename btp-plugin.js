@@ -1,7 +1,7 @@
 'use strict'
 
 const crypto = require('crypto')
-const debug = require('debug')('ilp-plugin-mini-accounts:btp-plugin')
+const debug = require('debug')('ilp-plugin-xrp:btp-plugin')
 const EventEmitter = require('events').EventEmitter
 const BtpPacket = require('btp-packet')
 const IlpPacket = require('ilp-packet')
@@ -302,6 +302,10 @@ class AbstractBtpPlugin extends EventEmitter {
           info.prefix = from + '.'
           info.connectors = [ from + '.server' ]
 
+          if (this._extraInfo) {
+            Object.assign(info, this._extraInfo(from, data))
+          }
+
           return [{
             protocolName: 'info',
             contentType: BtpPacket.MIME_APPLICATION_JSON,
@@ -329,11 +333,7 @@ class AbstractBtpPlugin extends EventEmitter {
       } else if (protocolMap.custom) {
         // Don't throw -- this message will be emitted.
       } else {
-        if (this._paychanContext.rpc.handleProtocols) {
-          return this._paychanContext.rpc.handleProtocols(protocolMap)
-        } else {
-          throw new Error('Unsupported side protocol.')
-        }
+        return
       }
     }
 
@@ -417,7 +417,7 @@ class AbstractBtpPlugin extends EventEmitter {
       protocolData = this._handleOutgoingFulfill(transfer, data)
     }
 
-    return 
+    return protocolData
   }
 
   async rejectIncomingTransfer (transferId, reason) {
