@@ -20,10 +20,18 @@ class Plugin extends AbstractBtpPlugin {
     this._unsecured = new BigNumber(0)
     this._bandwidth = 200
 
+    if (!opts.server || !opts.secret) {
+      throw new Error('opts.server and opts.secret must be specified')
+    }
+
     // TODO: should use channel secret or xrp secret
     this._secret = opts.secret
     this._address = opts.address || deriveAddress(deriveKeypair(this._secret).publicKey)
     this._xrpServer = opts.xrpServer
+
+    // optional
+    this._store = opts.store
+    this._writeQueue = Promise.resolve()
 
     this._log = opts._log || console
     this._ws = null
@@ -218,10 +226,19 @@ class Plugin extends AbstractBtpPlugin {
             return reject(new Error('Fatal: Payment channel has a hard cancel; Our connector is likely malicious'))
           }
 
-          // TODO: also load best claim from the crash-cache
           this._bestClaim = {
             amount: util.xrpToDrops(this._paychan.balance)
           }
+
+          // load the best claim from the crash cache
+          if (!this._store) {
+            const bestClaim = JSON.parse(await this._store.get(this._clientChannel))
+            if (bestClaim.amount > this._bestClaim) {
+              this._bestClaim = bestClaim
+              // TODO: should it submit the recovered claim right away or wait?
+            }
+          }
+
           debug('loaded best claim of', this._bestClaim)
         }
 
@@ -271,6 +288,10 @@ class Plugin extends AbstractBtpPlugin {
         }),
         new Promise(resolve => setTimeout(resolve, 10))
       ])
+
+      if (this._store) {
+        await this._writeQueue
+      }
 
       if (this._bestClaim.amount === '0') return
       if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
@@ -379,6 +400,12 @@ class Plugin extends AbstractBtpPlugin {
       debug('got new best claim for', amount)
       this._unsecured = this._unsecured.sub(transfer.amount)
       this._bestClaim = { amount, signature }
+
+      if (this._store) {
+        this._writeQueue = this._writeQueue.then(() => {
+          return this._store.put(this._clientChannel, JSON.stringify(this._bestClaim))
+        })
+      }
     }
   }
 
