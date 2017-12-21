@@ -1,4 +1,5 @@
 const bignum = require('bignum')
+const BigNumber = require('bignumber.js')
 const crypto = require('crypto')
 const addressCodec = require('ripple-address-codec')
 
@@ -41,7 +42,7 @@ function encodeClaim (amount, id) {
   ])
 }
 
-function randomTag {
+function randomTag () {
   return bignum.fromBuffer(crypto.randomBytes(4), {
     endian: 'big',
     size: 4

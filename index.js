@@ -182,7 +182,7 @@ class Plugin extends AbstractBtpPlugin {
         }
 
         // used to make sure we don't go over the limit
-        this._channelDetails = this._api.getPaymentChannel(this._channel)
+        this._channelDetails = await this._api.getPaymentChannel(this._channel)
 
         if (!this._clientChannel) {
           debug('no client channel has been established; requesting')
@@ -223,7 +223,7 @@ class Plugin extends AbstractBtpPlugin {
           }
 
           // don't accept any channel that can be closed too fast
-          if (this._paychan.settleDelay < MIN_SETTLE_DELAY) {
+          if (this._paychan.settleDelay < util.MIN_SETTLE_DELAY) {
             await this._disconnect()
             return reject(new Error('Fatal: Payment channel settle delay is too short; Our connector is likely malicious'))
           }
@@ -245,7 +245,7 @@ class Plugin extends AbstractBtpPlugin {
           }
 
           // load the best claim from the crash cache
-          if (!this._store) {
+          if (this._store) {
             const bestClaim = JSON.parse(await this._store.get(this._clientChannel))
             if (bestClaim.amount > this._bestClaim) {
               this._bestClaim = bestClaim

@@ -101,7 +101,7 @@ class Plugin extends AbstractBtpPlugin {
     }
   }
 
-  _channelClose (channelId, closeAt) {
+  async _channelClose (channelId, closeAt) {
     const account = channelToAccount.get(channelId) 
 
     // disable the account once the channel is closing
