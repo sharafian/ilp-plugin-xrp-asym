@@ -194,6 +194,8 @@ class Plugin extends AbstractBtpPlugin {
 
           await this._balances.load(account)
           await this._balances.load(account + ':claim')
+          await this._balances.load(account + ':client_channel')
+          await this._balances.load(account + ':outgoing_balance')
 
           if (existingChannel) {
             // TODO: DoS vector by requesting paychan on user connect?
