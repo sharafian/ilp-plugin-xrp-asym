@@ -390,11 +390,9 @@ class Plugin extends AbstractBtpPlugin {
     const newBalance = currentBalance.add(transfer.amount)
 
     // TODO: fund if above a certain threshold (50%?)
-    // TODO: issue claim
 
     this._balances.set(balanceKey, newBalance.toString())
     debug(`account ${balanceKey} added ${transfer.amount} units, new balance ${newBalance}`)
-
 
     // sign a claim
     const channel = this._balances.get(account + ':client_channel')

@@ -22,6 +22,7 @@ const plugin = new IlpPluginXrpStateless({
 - [x] create outgoing paychan (either automatically or separately as script)
 - [x] refactor shared functions into utils
 - [ ] watch for channel close or details changing
+- [ ] accept message telling you to refresh channel so that you see fund tx's
 
 #### Server
 
@@ -30,3 +31,6 @@ const plugin = new IlpPluginXrpStateless({
 - [x] supply channel details as part of info
 - [x] create outgoing paychan if there's an incoming one for certain amount
 - [x] what to do before channel exists for info
+- [ ] watch for channel close
+- [ ] fund tx for outgoing channel above threshold
+- [ ] tell client to refresh details after fund (or maybe automatically refreshing will be ok)
