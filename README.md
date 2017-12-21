@@ -21,11 +21,12 @@ const plugin = new IlpPluginXrpStateless({
 - [ ] make sure to save channel id with claims so the connector can't refuse to tell you it
 - [x] create outgoing paychan (either automatically or separately as script)
 - [x] refactor shared functions into utils
+- [ ] watch for channel close or details changing
 
 #### Server
 
 - [x] supply last claim on incoming fulfill
-- [ ] verify claim after outgoing fulfill
+- [x] verify claim after outgoing fulfill
 - [x] supply channel details as part of info
 - [x] create outgoing paychan if there's an incoming one for certain amount
 - [x] what to do before channel exists for info
