@@ -20,7 +20,7 @@ const plugin = new IlpPluginXrpStateless({
 - [ ] issue fund transaction when channel is reaching threshold
 - [ ] make sure to save channel id with claims so the connector can't refuse to tell you it
 - [x] create outgoing paychan (either automatically or separately as script)
-- [ ] refactor shared functions into utils
+- [x] refactor shared functions into utils
 
 #### Server
 

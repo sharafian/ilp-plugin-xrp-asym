@@ -1,5 +1,3 @@
-const crypto = require('crypto')
-const addressCodec = require('ripple-address-codec')
 const { deriveAddress, deriveKeypair } = require('ripple-keypairs')
 const { RippleAPI } = require('ripple-lib')
 const { URL } = require('url')
@@ -10,59 +8,9 @@ const assert = require('assert')
 const debug = require('debug')('ilp-plugin-xrp-stateless')
 const AbstractBtpPlugin = require('./btp-plugin')
 const base64url = require('base64url')
-const INFO_REQUEST_ALL = 2
-const OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP = '10' // TODO: something lower?
-const MIN_SETTLE_DELAY = 3600
 const nacl = require('tweetnacl')
-const bignum = require('bignum')
-const DROPS_PER_XRP = 1000000
-const dropsToXrp = (drops) => new BigNumber(drops).div(DROPS_PER_XRP).toString()
-const xrpToDrops = (xrp) => new BigNumber(xrp).mul(DROPS_PER_XRP).toString()
-
-function hmac (key, message) {
-  const h = crypto.createHmac('sha256', key)
-  h.update(message)
-  return h.digest()
-}
-
-const computeChannelId = (src, dest, sequence) => {
-  const preimage = Buffer.concat([
-    Buffer.from('\0x', 'ascii'),
-    Buffer.from(addressCodec.decodeAccountID(src)),
-    Buffer.from(addressCodec.decodeAccountID(dest)),
-    bignum(sequence).toBuffer({ endian: 'big', size: 4 })
-  ])
-
-  return crypto.createHash('sha512')
-    .update(preimage)
-    .digest()
-    .slice(0, 32) // first half sha512
-    .toString('hex')
-    .toUpperCase()
-}
-
-const encodeClaim = (amount, id) => Buffer.concat([
-  Buffer.from('CLM\0'),
-  Buffer.from(id, 'hex'),
-  bignum(amount).toBuffer({
-    endian: 'big',
-    size: 8
-  })
-])
-
-const randomTag = () => bignum.fromBuffer(crypto.randomBytes(4), {
-  endian: 'big',
-  size: 4
-}).toNumber()
-
-async function _requestId () {
-  return new Promise((resolve, reject) => {
-    crypto.randomBytes(4, (err, buf) => {
-      if (err) reject(err)
-      resolve(buf.readUInt32BE(0))
-    })
-  })
-}
+const util = require('./util')
+const OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP = '10' // TODO: something lower?
 
 class Plugin extends AbstractBtpPlugin {
   constructor (opts) {
@@ -85,11 +33,11 @@ class Plugin extends AbstractBtpPlugin {
 
   async _createOutgoingChannel () {
     debug('creating outgoing channel')
-    const txTag = randomTag()
+    const txTag = util.randomTag()
     const tx = await this._api.preparePaymentChannelCreate(this._address, {
       amount: OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP,
       destination: this._peerAddress,
-      settleDelay: MIN_SETTLE_DELAY,
+      settleDelay: util.MIN_SETTLE_DELAY,
       publicKey: 'ED' + Buffer.from(this._keyPair.publicKey).toString('hex').toUpperCase(),
       sourceTag: txTag
     })
@@ -113,7 +61,7 @@ class Plugin extends AbstractBtpPlugin {
         if (ev.transaction.Account !== this._address) return
 
         debug('transaction complete')
-        const channel = computeChannelId(
+        const channel = util.computeChannelId(
           ev.transaction.Account,
           ev.transaction.Destination,
           ev.transaction.Sequence)
@@ -154,17 +102,17 @@ class Plugin extends AbstractBtpPlugin {
 
         await this._call(null, {
           type: BtpPacket.TYPE_MESSAGE,
-          requestId: await _requestId(),
+          requestId: await util._requestId(),
           data: { protocolData }
         })
 
         const infoResponse = await this._call(null, {
           type: BtpPacket.TYPE_MESSAGE,
-          requestId: await _requestId(),
+          requestId: await util._requestId(),
           data: { protocolData: [{
             protocolName: 'info',
             contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-            data: Buffer.from([ INFO_REQUEST_ALL ])
+            data: Buffer.from([ util.INFO_REQUEST_ALL ])
           }] }
         })
 
@@ -181,7 +129,7 @@ class Plugin extends AbstractBtpPlugin {
         this._clientChannel = info.clientChannel
         this._peerAddress = info.address
         this._keyPair = nacl.sign.keyPair
-          .fromSeed(hmac(
+          .fromSeed(util.hmac(
             this._secret,
             'ilp-plugin-xrp-stateless' + this._peerAddress
           ))
@@ -226,7 +174,7 @@ class Plugin extends AbstractBtpPlugin {
         if (channelProtocolData.length) {
           const channelResponse = await this._call(null, {
             type: BtpPacket.TYPE_MESSAGE,
-            requestId: await _requestId(),
+            requestId: await util._requestId(),
             data: { protocolData: channelProtocolData }
           })
 
@@ -248,7 +196,7 @@ class Plugin extends AbstractBtpPlugin {
           this._paychan = await this._api.getPaymentChannel(this._clientChannel)
           // TODO: also load best claim from the crash-cache
           this._bestClaim = {
-            amount: xrpToDrops(this._paychan.balance)
+            amount: util.xrpToDrops(this._paychan.balance)
           }
           debug('loaded best claim of', this._bestClaim)
         }
@@ -301,11 +249,11 @@ class Plugin extends AbstractBtpPlugin {
       ])
 
       if (this._bestClaim.amount === '0') return
-      if (this._bestClaim.amount === xrpToDrops(this._paychan.balance)) return
+      if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
 
       debug('creating claim tx')
       const claimTx = await this._api.preparePaymentChannelClaim(this._address, {
-        balance: dropsToXrp(this._bestClaim.amount),
+        balance: util.dropsToXrp(this._bestClaim.amount),
         channel: this._clientChannel,
         signature: this._bestClaim.signature.toUpperCase(),
         publicKey: this._paychan.publicKey
@@ -344,7 +292,7 @@ class Plugin extends AbstractBtpPlugin {
     debug('got outgoing fulfill with primary protocol', primary && primary.protocolName)
     if (primary.protocolName === 'claim') {
       const lastClaim = JSON.parse(primary.data.toString())
-      const encodedClaim = encodeClaim(lastClaim.amount, this._channel)
+      const encodedClaim = util.encodeClaim(lastClaim.amount, this._channel)
 
       debug('given last claim of', lastClaim)
 
@@ -366,7 +314,7 @@ class Plugin extends AbstractBtpPlugin {
       }
 
       const amount = new BigNumber(lastClaim.amount).add(transfer.amount).toString()
-      const newClaimEncoded = encodeClaim(amount, this._channel)
+      const newClaimEncoded = util.encodeClaim(amount, this._channel)
       const signature = Buffer
         .from(nacl.sign.detached(newClaimEncoded, this._keyPair.secretKey))
         .toString('hex')
@@ -386,7 +334,7 @@ class Plugin extends AbstractBtpPlugin {
     if (primary.protocolName === 'claim') {
       const nextAmount = new BigNumber(this._bestClaim.amount).add(transfer.amount)
       const { amount, signature } = JSON.parse(primary.data.toString())
-      const encodedClaim = encodeClaim(amount, this._clientChannel)
+      const encodedClaim = util.encodeClaim(amount, this._clientChannel)
 
       if (nextAmount.greaterThan(amount)) {
         debug('expected claim for', nextAmount.toString(), 'got', amount)

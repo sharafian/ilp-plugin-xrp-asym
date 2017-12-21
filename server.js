@@ -10,51 +10,10 @@ const debug = require('debug')('ilp-plugin-multi-xrp-paychan')
 const AbstractBtpPlugin = require('./btp-plugin')
 const StoreWrapper = require('./store-wrapper')
 const base64url = require('base64url')
-const MIN_SETTLE_DELAY = 3600
 const bignum = require('bignum')
-
-const MIN_INCOMING_CHANNEL = '5000000'
-const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const OUTGOING_CHANNEL_DEFAULT_AMOUNT = Math.pow(10, 6) // 1 XRP
-const EMPTY_CONDITION = base64url(crypto.createHash('sha256').update(Buffer.alloc(32)).digest())
-const DROPS_PER_XRP = 1000000
-const dropsToXrp = (drops) => new BigNumber(drops).div(DROPS_PER_XRP).toString()
-const xrpToDrops = (xrp) => new BigNumber(xrp).mul(DROPS_PER_XRP).toString()
-const encodeClaim = (amount, id) => Buffer.concat([
-  Buffer.from('CLM\0'),
-  Buffer.from(id, 'hex'),
-  bignum(amount).toBuffer({
-    endian: 'big',
-    size: 8
-  })
-])
-
-function hmac (key, message) {
-  const h = crypto.createHmac('sha256', key)
-  h.update(message)
-  return h.digest()
-}
-
-const computeChannelId = (src, dest, sequence) => {
-  const preimage = Buffer.concat([
-    Buffer.from('\0x', 'ascii'),
-    Buffer.from(addressCodec.decodeAccountID(src)),
-    Buffer.from(addressCodec.decodeAccountID(dest)),
-    bignum(sequence).toBuffer({ endian: 'big', size: 4 })
-  ])
-
-  return crypto.createHash('sha512')
-    .update(preimage)
-    .digest()
-    .slice(0, 32) // first half sha512
-    .toString('hex')
-    .toUpperCase()
-}
-
-const randomTag = () => bignum.fromBuffer(crypto.randomBytes(4), {
-  endian: 'big',
-  size: 4
-}).toNumber()
+const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
+const util = require('./util')
 
 function tokenToAccount (token) {
   return base64url(crypto.createHash('sha256').update(token).digest('sha256'))
@@ -66,16 +25,6 @@ function ilpAddressToAccount (prefix, ilpAddress) {
   }
 
   return ilpAddress.substr(prefix.length).split('.')[0]
-}
-
-function checkChannelExpiry (expiry) {
-  const isAfter = moment().add(MIN_SETTLE_DELAY, 'seconds').isAfter(expiry)
-
-  if (isAfter) {
-    debug('incoming payment channel expires too soon. ' +
-        'Minimum expiry is ' + MIN_SETTLE_DELAY + ' seconds.')
-    throw new Error('incoming channel expires too soon')
-  }
 }
 
 class Plugin extends AbstractBtpPlugin {
@@ -110,18 +59,18 @@ class Plugin extends AbstractBtpPlugin {
 
   _validatePaychanDetails (paychan) {
     const settleDelay = paychan.settleDelay
-    if (settleDelay < MIN_SETTLE_DELAY) {
+    if (settleDelay < util.MIN_SETTLE_DELAY) {
       debug(`incoming payment channel has a too low settle delay of ${settleDelay.toString()}` +
-        ` seconds. Minimum settle delay is ${MIN_SETTLE_DELAY} seconds.`)
+        ` seconds. Minimum settle delay is ${util.MIN_SETTLE_DELAY} seconds.`)
       throw new Error('settle delay of incoming payment channel too low')
     }
 
     if (paychan.cancelAfter) {
-      checkChannelExpiry(paychan.cancelAfter)
+      util.checkChannelExpiry(paychan.cancelAfter)
     }
 
     if (paychan.expiration) {
-      checkChannelExpiry(paychan.expiration)
+      util.checkChannelExpiry(paychan.expiration)
     }
 
     if (paychan.destination !== this._address) {
@@ -290,13 +239,13 @@ class Plugin extends AbstractBtpPlugin {
     const outgoingAccount = primary.data.toString() 
     // TODO: validate the account
 
-    const keyPairSeed = hmac(this._secret, CHANNEL_KEYS + account)
+    const keyPairSeed = util.hmac(this._secret, CHANNEL_KEYS + account)
     const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
-    const txTag = randomTag()
+    const txTag = util.randomTag()
     const tx = await this._api.preparePaymentChannelCreate(this._address, {
       amount: dropsToXrp(OUTGOING_CHANNEL_DEFAULT_AMOUNT),
       destination: outgoingAccount,
-      settleDelay: MIN_SETTLE_DELAY,
+      settleDelay: util.MIN_SETTLE_DELAY,
       publicKey: 'ED' + Buffer.from(keyPair.publicKey).toString('hex').toUpperCase(),
       sourceTag: txTag
     })
@@ -315,7 +264,7 @@ class Plugin extends AbstractBtpPlugin {
         if (ev.transaction.SourceTag !== txTag) return
         if (ev.transaction.Account !== this._address) return
 
-        const clientChannelId = computeChannelId(
+        const clientChannelId = util.computeChannelId(
           ev.transaction.Account,
           ev.transaction.Destination,
           ev.transaction.Sequence)
@@ -367,7 +316,7 @@ class Plugin extends AbstractBtpPlugin {
     if (fundChannel) {
       const incomingChannel = this._paychans.get(account)
 
-      if (new BigNumber(xrpToDrops(incomingChannel.amount)).lessThan(MIN_INCOMING_CHANNEL)) {
+      if (new BigNumber(util.xrpToDrops(incomingChannel.amount)).lessThan(MIN_INCOMING_CHANNEL)) {
         debug('denied outgoing paychan request; not enough has been escrowed')
         throw new Error('not enough has been escrowed in channel; must put ' +
           MIN_INCOMING_CHANNEL + ' drops on hold')
@@ -424,7 +373,7 @@ class Plugin extends AbstractBtpPlugin {
       throw new Error('Insufficient bandwidth, used: ' + unsecured + ' max: ' + this._bandwidth)
     }
 
-    if (newPrepared.greaterThan(xrpToDrops(paychan.amount))) {
+    if (newPrepared.greaterThan(util.xrpToDrops(paychan.amount))) {
       throw new Error('Insufficient funds, have: ' + newPrepared + ' need: ' + prepare.amount)
     }
 
@@ -449,8 +398,8 @@ class Plugin extends AbstractBtpPlugin {
 
     // sign a claim
     const channel = this._balances.get(account + ':client_channel')
-    const encodedClaim = encodeClaim(newBalance.toString(), channel)
-    const keyPairSeed = hmac(this._secret, CHANNEL_KEYS + account)
+    const encodedClaim = util.encodeClaim(newBalance.toString(), channel)
+    const keyPairSeed = util.hmac(this._secret, CHANNEL_KEYS + account)
     const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
     const signature = nacl.sign.detached(encodedClaim, keyPair.secretKey)
 
@@ -497,7 +446,7 @@ class Plugin extends AbstractBtpPlugin {
     const channel = this._balances.get(account + ':channel')
     const paychan = this._paychans.get(account)
     const { amount, signature } = claim
-    const encodedClaim = encodeClaim(amount, channel)
+    const encodedClaim = util.encodeClaim(amount, channel)
 
     try {
       valid = nacl.sign.detached.verify(
@@ -517,7 +466,7 @@ class Plugin extends AbstractBtpPlugin {
     }
 
     // validate claim against balance
-    const channelBalance = xrpToDrops(paychan.amount)
+    const channelBalance = util.xrpToDrops(paychan.amount)
     if (new BigNumber(amount).gt(channelBalance)) {
       const message = 'got claim for amount higher than channel balance. amount: ' + amount + ', incoming channel balance: ' + channelBalance
       debug(message)
