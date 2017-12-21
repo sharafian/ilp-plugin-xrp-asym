@@ -19,7 +19,7 @@ class Plugin extends AbstractBtpPlugin {
     this._currencyScale = 6
     this._server = opts.server
     this._unsecured = new BigNumber(0)
-    this._bandwidth = 200
+    this._bandwidth = opts.bandwidth || 200
 
     if (!opts.server || !opts.secret) {
       throw new Error('opts.server and opts.secret must be specified')
@@ -412,11 +412,14 @@ class Plugin extends AbstractBtpPlugin {
       // TODO: should there be a balance check to make sure we have enough to fund the channel?
       // TODO: should this functionality be enabled by default?
       if (!this._funding && aboveThreshold) {
+        debug('adding funds to channel')
         this._funding = util.fundChannel({
           api: this._api,
           channel: this._channel,
+          address: this._address,
+          secret: this._secret,
           // TODO: configurable fund amount?
-          amount: xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP)
+          amount: util.xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP)
         })
           .then(async () => {
             this._funding = false
@@ -431,7 +434,8 @@ class Plugin extends AbstractBtpPlugin {
               }] }
             })
           })
-          .catch(() => {
+          .catch((e) => {
+            debug('fund tx/notify failed:', e)
             this._funding = false
           })
       }

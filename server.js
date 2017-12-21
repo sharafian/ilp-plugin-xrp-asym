@@ -119,7 +119,7 @@ class Plugin extends AbstractBtpPlugin {
 
     debug('creating close tx')
     const tx = await this._api.preparePaymentChannelClaim(this._address, {
-      balance: dropsToXrp(balance.toString()),
+      balance: util.dropsToXrp(balance.toString()),
       signature: signature.toString('hex').toUpperCase(),
       publicKey: 'ED' + Buffer.from(keyPair.publicKey).toString('hex').toUpperCase(),
       channel,
@@ -299,7 +299,7 @@ class Plugin extends AbstractBtpPlugin {
     const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
     const txTag = util.randomTag()
     const tx = await this._api.preparePaymentChannelCreate(this._address, {
-      amount: dropsToXrp(OUTGOING_CHANNEL_DEFAULT_AMOUNT),
+      amount: util.dropsToXrp(OUTGOING_CHANNEL_DEFAULT_AMOUNT),
       destination: outgoingAccount,
       settleDelay: util.MIN_SETTLE_DELAY,
       publicKey: 'ED' + Buffer.from(keyPair.publicKey).toString('hex').toUpperCase(),
@@ -481,15 +481,19 @@ class Plugin extends AbstractBtpPlugin {
     // TODO: can there be multiple funding transactions in flight?
     // TODO: should the amount of funding ramp up or go linearly?
     if (!this._funding.get(account) && aboveThreshold) {
+      debug('adding funds to channel for account', account)
       this._funding.set(account, true)
       util.fundChannel({
         api: this._api,
-        channel: this._channel,
+        channel: channel,
+        address: this._address,
+        secret: this._secret,
         // TODO: configurable fund amount?
-        amount: xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT)
+        amount: util.xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT)
       })
         .then(async () => {
           this._funding.set(account, false)
+          debug('completed fund tx for account', account)
           await this._call(transfer.to, {
             type: BtpPacket.TYPE_MESSAGE,
             requestId: await util._requestId(),
@@ -500,7 +504,8 @@ class Plugin extends AbstractBtpPlugin {
             }] }
           })
         })
-        .catch(() => {
+        .catch((e) => {
+          debug('funding tx/notify failed:', e)
           this._funding.set(account, false)
         })
     }

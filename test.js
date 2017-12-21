@@ -15,12 +15,14 @@ const serverPlugin = new IlpPluginXrpServer({
   address: 'r9Ggkrw4VCfRzSqgrkJTeyfZvBvaG9z3hg',
   secret: 'snRHsS3wLzbfeDNSVmtLKjE6sPMws',
   xrpServer: 'wss://s.altnet.rippletest.net:51233',
+  bandwidth: 1000000,
   _store: new Store(null, 'test.example.')
 })
 
 const clientPlugin = new IlpPluginXrpStateless({
   server: 'btp+wss://:secret@localhost:3033',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
+  bandwidth: 1000000
   // address: 'rsxjtFn93z2M4eMyjFaMFiHwzeH1K9xK3K',
   // xrpServer: 'wss://s.altnet.rippletest.net:51233'
 })
@@ -54,12 +56,12 @@ async function run () {
     await clientPlugin.sendTransfer({
       id: '0928cea4-5871-b31e-86f5-e1d741676a74',
       to: serverPlugin.getAccount(),
-      amount: '10',
+      amount: '1000',
       executionCondition: condition,
       expiresAt: new Date(Date.now() + 10 * 1000),
       ilp: IlpPacket.serializeIlpPayment({
         account: serverPlugin.getAccount(),
-        amount: '10'
+        amount: '1000'
       })
     })
 
@@ -91,12 +93,12 @@ async function run () {
     await serverPlugin.sendTransfer({
       id: '0928cea4-5871-b31e-86f5-e1d741676a74',
       to: clientPlugin.getAccount(),
-      amount: '10',
+      amount: '1000',
       executionCondition: condition,
       expiresAt: new Date(Date.now() + 10 * 1000),
       ilp: IlpPacket.serializeIlpPayment({
         account: clientPlugin.getAccount(),
-        amount: '10'
+        amount: '1000'
       })
     })
 
@@ -106,8 +108,8 @@ async function run () {
   console.log('preparing to send payment server -> client')
   await serverToClient()
 
-  console.log('disconnecting server')
-  await serverPlugin.disconnect()
+  //console.log('disconnecting server')
+  //await serverPlugin.disconnect()
 
   console.log('disconnecting client')
   await clientPlugin.disconnect()

@@ -1,4 +1,5 @@
 const bignum = require('bignum')
+const debug = require('debug')('ilp-plugin-xrp:util')
 const BigNumber = require('bignumber.js')
 const crypto = require('crypto')
 const addressCodec = require('ripple-address-codec')
@@ -69,19 +70,21 @@ function checkChannelExpiry (expiry) {
 }
 
 async function fundChannel ({ api, channel, amount, address, secret }) {
+  debug('preparing fund tx')
   const xrpAmount = dropsToXrp(amount)
   const tx = await api.preparePaymentChannelFund(address, {
     amount: xrpAmount,
     channel
   })
 
+  debug('submitting fund tx')
   const signedTx = api.sign(tx.txJSON, secret)
   const { resultCode, resultMessage } = await api.submit(signedTx.signedTransaction)
 
+  debug('got fund submit result', resultCode)
   if (resultCode !== 'tesSUCCESS') {
-    // TODO: throw error or return?
     debug('unable to fund channel:', resultCode, resultMessage)
-    return
+    throw new Error('unable to fund channel: ' + resultCode + ' ' + resultMessage)
   }
 
   return new Promise((resolve) => {
@@ -89,7 +92,7 @@ async function fundChannel ({ api, channel, amount, address, secret }) {
       if (ev.transaction.hash !== signedTx.id) return
       if (ev.engine_result !== 'tesSUCCESS') {
         debug('failed fund tx:', ev) 
-        resolve() // TODO: throw error?
+        reject(new Error('failed fund tx: ' + JSON.stringify(ev)))
       }
 
       debug('funded channel')
@@ -114,5 +117,6 @@ module.exports = {
   encodeClaim,
   randomTag,
   _requestId,
-  checkChannelExpiry
+  checkChannelExpiry,
+  fundChannel
 }
