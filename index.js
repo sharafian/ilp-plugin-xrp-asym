@@ -308,6 +308,10 @@ class Plugin extends AbstractBtpPlugin {
         await this._writeQueue
       }
 
+      if (this._funding) {
+        await this._funding
+      }
+
       if (this._bestClaim.amount === '0') return
       if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
 
@@ -408,8 +412,7 @@ class Plugin extends AbstractBtpPlugin {
       // TODO: should there be a balance check to make sure we have enough to fund the channel?
       // TODO: should this functionality be enabled by default?
       if (!this._funding && aboveThreshold) {
-        this._funding = true
-        util.fundChannel({
+        this._funding = util.fundChannel({
           api: this._api,
           channel: this._channel,
           // TODO: configurable fund amount?
