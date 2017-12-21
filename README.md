@@ -4,7 +4,7 @@
 ```js
 const plugin = new IlpPluginXrpStateless({
   server: 'btp+wss://:secret@example.com',
-  secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
+  secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs'
 })
 ```
 
