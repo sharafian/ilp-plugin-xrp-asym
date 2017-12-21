@@ -67,6 +67,41 @@ function checkChannelExpiry (expiry) {
   }
 }
 
+async function fundChannel ({ api, channel, amount, address, secret }) {
+  const xrpAmount = dropsToXrp(amount)
+  const tx = await api.preparePaymentChannelFund(address, {
+    amount: xrpAmount,
+    channel
+  })
+
+  const signedTx = api.sign(tx.txJSON, secret)
+  const { resultCode, resultMessage } = await api.submit(signedTx.signedTransaction)
+
+  if (resultCode !== 'tesSUCCESS') {
+    // TODO: throw error or return?
+    debug('unable to fund channel:', resultCode, resultMessage)
+    return
+  }
+
+  return new Promise((resolve) => {
+    async function handleTransaction (ev) {
+      if (ev.transaction.hash !== signedTx.id) return
+      if (ev.engine_result !== 'tesSUCCESS') {
+        debug('failed fund tx:', ev) 
+        resolve() // TODO: throw error?
+      }
+
+      debug('funded channel')
+      setImmediate(() => self.api.connection
+        .removeListener('transaction', handleTransaction))
+
+      resolve()
+    }
+
+    api.connection.on('transaction', handleTransaction)
+  })
+}
+
 module.exports = {
   INFO_REQUEST_ALL,
   MIN_SETTLE_DELAY, 

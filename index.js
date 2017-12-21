@@ -29,6 +29,9 @@ class Plugin extends AbstractBtpPlugin {
     this._address = opts.address || deriveAddress(deriveKeypair(this._secret).publicKey)
     this._xrpServer = opts.xrpServer
 
+    // make sure two funds don't happen at once
+    this._funding = false
+
     // optional
     this._store = opts.store
     this._writeQueue = Promise.resolve()
@@ -169,6 +172,9 @@ class Plugin extends AbstractBtpPlugin {
             data: Buffer.from(this._channel, 'hex')
           })
         }
+
+        // used to make sure we don't go over the limit
+        this._channelDetails = this._api.getPaymentChannel(this._channel)
 
         if (!this._clientChannel) {
           debug('no client channel has been established; requesting')
@@ -364,6 +370,30 @@ class Plugin extends AbstractBtpPlugin {
         .from(nacl.sign.detached(newClaimEncoded, this._keyPair.secretKey))
         .toString('hex')
         .toUpperCase()
+
+      const aboveThreshold = new BigNumber(util
+        .xrpToDrops(this._channelDetails.amount))
+        .div(2) // TODO: configurable threshold?
+        .lessThan(amount)
+
+      // if the claim we're signing is for more than half the channel's balance, add some funds
+      // TODO: should there be a balance check to make sure we have enough to fund the channel?
+      // TODO: should this functionality be enabled by default?
+      if (!this._funding && aboveThreshold) {
+        this._funding = true
+        util.fundChannel({
+          api: this._api,
+          channel: this._channel,
+          // TODO: configurable fund amount?
+          amount: xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP)
+        })
+          .then(() => {
+            this._funding = false
+          })
+          .catch(() => {
+            this._funding = false
+          })
+      }
 
       return [{
         protocolName: 'claim',

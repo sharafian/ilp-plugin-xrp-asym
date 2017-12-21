@@ -47,7 +47,9 @@ class Plugin extends AbstractBtpPlugin {
     this._balances = new StoreWrapper(opts._store)
     this._ephemeral = new Map()
     this._paychans = new Map()
+    this._clientPaychans = new Map()
     this._connections = new Map()
+    this._funding = new Map()
 
     this.on('incoming_fulfill', this._handleIncomingFulfill.bind(this))
     this.on('incoming_reject', this._handleIncomingReject.bind(this))
@@ -145,12 +147,18 @@ class Plugin extends AbstractBtpPlugin {
           await this._balances.load(account + ':claim')
           await this._balances.load(account + ':client_channel')
           await this._balances.load(account + ':outgoing_balance')
+          const existingClientChannel = this._balances.get(account + ':client_channel')
 
           if (existingChannel) {
             // TODO: DoS vector by requesting paychan on user connect?
             const paychan = await this._api.getPaymentChannel(existingChannel)
             this._validatePaychanDetails(paychan)
             this._paychans.set(account, paychan)
+          }
+
+          if (existingClientChannel) {
+            const paychan = await this._api.getPaymentChannel(existingClientChannel)
+            this._clientPaychans.set(account, paychan)
           }
 
           this._ephemeral.set(account, this._balances.get(account))
@@ -231,6 +239,8 @@ class Plugin extends AbstractBtpPlugin {
 
     const existing = this._balances.get(account + ':client_channel')
     if (existing) {
+      const paychan = await this._api.getPaymentChannel(existing)
+      this._clientChannels.set(account, paychan)
       return existing
     }
 
@@ -260,7 +270,7 @@ class Plugin extends AbstractBtpPlugin {
     }
 
     return new Promise((resolve) => {
-      const handleTransaction = (ev) => {
+      const handleTransaction = async (ev) => {
         if (ev.transaction.SourceTag !== txTag) return
         if (ev.transaction.Account !== this._address) return
 
@@ -271,6 +281,9 @@ class Plugin extends AbstractBtpPlugin {
 
         this._balances.set(account + ':outgoing_balance', '0')
         this._balances.set(account + ':client_channel', clientChannelId)
+
+        const paychan = await this._api.getPaymentChannel(clientChannelId)
+        this._clientPaychans.set(account, paychan)
 
         setImmediate(() => this._api.connection
           .removeListener('transaction', handleTransaction))
@@ -404,7 +417,29 @@ class Plugin extends AbstractBtpPlugin {
     debug(`signing outgoing claim for ${newBalance.toString()} drops on ` +
       `channel ${channel}`)
 
-    // TODO: issue a fund tx if fundPercent is reached and tell peer about fund tx
+    const aboveThreshold = new BigNumber(util
+      .xrpToDrops(this._clientPaychans.get(account).amount))
+      .div(2) // TODO: configurable threshold?
+      .lessThan(newBalance.toString())
+
+    // if the claim we're signing is for more than half the channel's balance, add some funds
+    // TODO: can there be multiple funding transactions in flight?
+    // TODO: should the amount of funding ramp up or go linearly?
+    if (!this._funding.get(account) && aboveThreshold) {
+      this._funding.set(account, true)
+      util.fundChannel({
+        api: this._api,
+        channel: this._channel,
+        // TODO: configurable fund amount?
+        amount: xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT)
+      })
+        .then(() => {
+          this._funding.set(account, false)
+        })
+        .catch(() => {
+          this._funding.set(account, false)
+        })
+    }
 
     return [{
       protocolName: 'claim',

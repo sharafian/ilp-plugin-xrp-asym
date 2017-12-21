@@ -17,7 +17,7 @@ const plugin = new IlpPluginXrpStateless({
 - [x] cache claim somewhere in case of crash
 - [x] load channel balance at connect to determine best claim
 - [x] load cache at connect to determine best claim
-- [ ] issue fund transaction when channel is reaching threshold
+- [x] issue fund transaction when channel is reaching threshold
 - [x] make sure to save channel id with claims so the connector can't refuse to tell you it
 - [x] create outgoing paychan (either automatically or separately as script)
 - [x] refactor shared functions into utils
@@ -32,5 +32,5 @@ const plugin = new IlpPluginXrpStateless({
 - [x] create outgoing paychan if there's an incoming one for certain amount
 - [x] what to do before channel exists for info
 - [ ] watch for channel close
-- [ ] fund tx for outgoing channel above threshold
+- [x] fund tx for outgoing channel above threshold
 - [ ] tell client to refresh details after fund (or maybe automatically refreshing will be ok)
