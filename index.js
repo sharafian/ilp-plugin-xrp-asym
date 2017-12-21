@@ -1,5 +1,6 @@
 const crypto = require('crypto')
 const addressCodec = require('ripple-address-codec')
+const { deriveAddress, deriveKeypair } = require('ripple-keypairs')
 const { RippleAPI } = require('ripple-lib')
 const { URL } = require('url')
 const BtpPacket = require('btp-packet')
@@ -73,9 +74,8 @@ class Plugin extends AbstractBtpPlugin {
 
     // TODO: should use channel secret or xrp secret
     this._secret = opts.secret
-    this._address = opts.address // TODO: can default from secret
-    this._xrpServer = opts.xrpServer // TODO: default here
-    this._api = new RippleAPI({ server: this._xrpServer })
+    this._address = opts.address || deriveAddress(deriveKeypair(this._secret).publicKey)
+    this._xrpServer = opts.xrpServer
 
     this._log = opts._log || console
     this._ws = null
@@ -129,12 +129,6 @@ class Plugin extends AbstractBtpPlugin {
 
   async connect () {
     if (this._ws) return
-
-    await this._api.connect()
-    await this._api.connection.request({
-      command: 'subscribe',
-      accounts: [ this._address ]
-    })
 
     const parsedServer = new URL(this._server)
     const host = parsedServer.host // TODO: include path
@@ -191,6 +185,19 @@ class Plugin extends AbstractBtpPlugin {
             this._secret,
             'ilp-plugin-xrp-stateless' + this._peerAddress
           ))
+
+        if (!this._xrpServer) {
+          this._xrpServer = this._account.startsWith('test.')
+            ? 'wss://s.altnet.rippletest.net:51233'
+            : 's1.ripple.com'
+        }
+
+        this._api = new RippleAPI({ server: this._xrpServer })
+        await this._api.connect()
+        await this._api.connection.request({
+          command: 'subscribe',
+          accounts: [ this._address ]
+        })
 
         // TODO: is this an attack vector, if not telling the plugin about their channel
         // causes them to open another channel?

@@ -21,8 +21,8 @@ const serverPlugin = new IlpPluginXrpServer({
 const clientPlugin = new IlpPluginXrpStateless({
   server: 'btp+wss://:secret@localhost:3033',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
-  address: 'rsxjtFn93z2M4eMyjFaMFiHwzeH1K9xK3K',
-  xrpServer: 'wss://s.altnet.rippletest.net:51233'
+  // address: 'rsxjtFn93z2M4eMyjFaMFiHwzeH1K9xK3K',
+  // xrpServer: 'wss://s.altnet.rippletest.net:51233'
 })
 
 async function run () {

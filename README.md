@@ -5,8 +5,6 @@
 const plugin = new IlpPluginXrpStateless({
   server: 'btp+wss://:secret@example.com',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
-  address: 'rsxjtFn93z2M4eMyjFaMFiHwzeH1K9xK3K',
-  xrpServer: 'wss://s.altnet.rippletest.net:51233'
 })
 ```
 
