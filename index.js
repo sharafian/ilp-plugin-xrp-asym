@@ -96,7 +96,7 @@ class Plugin extends AbstractBtpPlugin {
       data: Buffer.from(secret, 'utf8')
     }]
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       this._ws.on('open', async () => {
         debug('connected to server')
 
@@ -192,8 +192,32 @@ class Plugin extends AbstractBtpPlugin {
         // TODO: should this occur as part of info or should the connector send us a
         // separate message to inform us that they have a channel to us?
         if (this._clientChannel) {
-          // TODO: validate all these payment channel details
           this._paychan = await this._api.getPaymentChannel(this._clientChannel)
+
+          // don't accept any channel that isn't for us
+          if (this._paychan.destination !== this._address) {
+            await this._disconnect()
+            return reject(new Error('Fatal: Payment channel destination is not ours; Our connector is likely malicious'))
+          }
+
+          // don't accept any channel that can be closed too fast
+          if (this._paychan.settleDelay < MIN_SETTLE_DELAY) {
+            await this._disconnect()
+            return reject(new Error('Fatal: Payment channel settle delay is too short; Our connector is likely malicious'))
+          }
+
+          // don't accept any channel that is closing
+          if (this._paychan.expiration) {
+            await this._disconnect()
+            return reject(new Error('Fatal: Payment channel is already closing; Our connector is likely malicious'))
+          }
+
+          // don't accept any channel with a static cancel time
+          if (this._paychan.cancelAfter) {
+            await this._disconnect()
+            return reject(new Error('Fatal: Payment channel has a hard cancel; Our connector is likely malicious'))
+          }
+
           // TODO: also load best claim from the crash-cache
           this._bestClaim = {
             amount: util.xrpToDrops(this._paychan.balance)
