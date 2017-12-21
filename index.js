@@ -337,6 +337,25 @@ class Plugin extends AbstractBtpPlugin {
     }
   }
 
+  async _handleBtpMessage (from, message) {
+    const protocols = message.protocolData
+    if (!protocols.length) return
+
+    const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
+    if (channelProtocol) {
+      debug('got notification of changing channel details')  
+      const channel = channelProtocol.data
+        .toString('hex')
+        .toUpperCase()
+
+      // we just use this call to refresh the channel details
+      // TODO: can use this protocol to establish client paychan at a later date
+      // than the connection.
+      if (channel !== this._clientChannel) return
+      this._paychan = await this._api.getPaymentChannel(channel)
+    }
+  }
+
   _handleOutgoingFulfill (transfer, btpData) {
     const primary = btpData.protocolData[0]
 
@@ -387,8 +406,18 @@ class Plugin extends AbstractBtpPlugin {
           // TODO: configurable fund amount?
           amount: xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP)
         })
-          .then(() => {
+          .then(async () => {
             this._funding = false
+            // send a 'channel' call in order to refresh details
+            await this._call(null, {
+              type: BtpPacket.TYPE_MESSAGE,
+              requestId: await util._requestId(),
+              data: { protocolData: [{
+                protocolName: 'channel',
+                contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+                data: Buffer.from(this._channel, 'hex')
+              }] }
+            })
           })
           .catch(() => {
             this._funding = false

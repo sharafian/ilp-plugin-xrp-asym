@@ -433,8 +433,17 @@ class Plugin extends AbstractBtpPlugin {
         // TODO: configurable fund amount?
         amount: xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT)
       })
-        .then(() => {
+        .then(async () => {
           this._funding.set(account, false)
+          await this._call(transfer.to, {
+            type: BtpPacket.TYPE_MESSAGE,
+            requestId: await util._requestId(),
+            data: { protocolData: [{
+              protocolName: 'channel',
+              contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+              data: Buffer.from(channel, 'hex')
+            }] }
+          })
         })
         .catch(() => {
           this._funding.set(account, false)
