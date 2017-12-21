@@ -290,6 +290,11 @@ class Plugin extends AbstractBtpPlugin {
 
   async disconnect () {
     if (this._ws) {
+      // complete any funding txes before we disconnect
+      if (this._funding) {
+        await this._funding
+      }
+
       // bind error to no-op so that it doesn't crash before we
       // submit our claim
       this._ws.on('error', e => {
@@ -306,10 +311,6 @@ class Plugin extends AbstractBtpPlugin {
 
       if (this._store) {
         await this._writeQueue
-      }
-
-      if (this._funding) {
-        await this._funding
       }
 
       if (this._bestClaim.amount === '0') return
