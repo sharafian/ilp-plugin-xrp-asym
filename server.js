@@ -121,7 +121,7 @@ class Plugin extends AbstractBtpPlugin {
     const tx = await this._api.preparePaymentChannelClaim(this._address, {
       balance: dropsToXrp(balance.toString()),
       signature: signature.toString('hex').toUpperCase(),
-      publicKey: keyPair.publicKey.toString('hex').toUpperCase(),
+      publicKey: 'ED' + Buffer.from(keyPair.publicKey).toString('hex').toUpperCase(),
       channel,
       close: true
     })
