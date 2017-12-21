@@ -14,6 +14,7 @@ const bignum = require('bignum')
 const OUTGOING_CHANNEL_DEFAULT_AMOUNT = Math.pow(10, 6) // 1 XRP
 const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const util = require('./util')
+const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 
 function tokenToAccount (token) {
   return base64url(crypto.createHash('sha256').update(token).digest('sha256'))
@@ -40,6 +41,7 @@ class Plugin extends AbstractBtpPlugin {
     this._secret = opts.secret
     this._address = opts.address
     this._api = new RippleAPI({ server: this._xrpServer })
+    this._watcher = new ChannelWatcher(10 * 60 * 1000, this._api)
     this._bandwidth = opts.bandwidth || 1000
 
     this._log = opts._log || console
@@ -48,6 +50,7 @@ class Plugin extends AbstractBtpPlugin {
     this._ephemeral = new Map()
     this._paychans = new Map()
     this._clientPaychans = new Map()
+    this._channelToAccount = new Map()
     this._connections = new Map()
     this._funding = new Map()
 
@@ -68,11 +71,13 @@ class Plugin extends AbstractBtpPlugin {
     }
 
     if (paychan.cancelAfter) {
-      util.checkChannelExpiry(paychan.cancelAfter)
+      debug('got incoming payment channel with cancelAfter')
+      throw new Error('channel must not have a cancelAfter')
     }
 
     if (paychan.expiration) {
-      util.checkChannelExpiry(paychan.expiration)
+      debug('got incoming payment channel with expiration')
+      throw new Error('channel must not be in the process of closing')
     }
 
     if (paychan.destination !== this._address) {
@@ -96,8 +101,45 @@ class Plugin extends AbstractBtpPlugin {
     }
   }
 
+  _channelClose (channelId, closeAt) {
+    const account = channelToAccount.get(channelId) 
+
+    // disable the account once the channel is closing
+    this._balances.set(account + ':block')
+
+    // close our outgoing channel to them
+    debug('creating claim for closure')
+    const balanceKey = account + ':outgoing_balance'
+    const balance = this._balances.get(balanceKey)
+    const channel = this._balances.get(account + ':client_channel')
+    const encodedClaim = util.encodeClaim(balance.toString(), channel)
+    const keyPairSeed = util.hmac(this._secret, CHANNEL_KEYS + account)
+    const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
+    const signature = nacl.sign.detached(encodedClaim, keyPair.secretKey)
+
+    debug('creating close tx')
+    const tx = await this._api.preparePaymentChannelClaim(this._address, {
+      balance: dropsToXrp(balance.toString()),
+      signature: signature.toString('hex').toUpperCase(),
+      publicKey: keyPair.publicKey.toString('hex').toUpperCase(),
+      channel,
+      close: true
+    })
+
+    debug('signing close transaction')
+    const signedTx = this._api.sign(tx.txJSON, this._secret)
+
+    debug('submitting close transaction', tx)
+    const {resultCode, resultMessage} = await this._api.submit(signedTx.signedTransaction)
+    if (resultCode !== 'tesSUCCESS') {
+      console.error('WARNING: Error submitting close: ', resultMessage)
+    }
+  }
+
   async connect () {
     if (this._wss) return
+    
+    this._watcher.on('close', this._channelClose)
 
     await this._api.connect()
     await this._api.connection.request({
@@ -145,6 +187,7 @@ class Plugin extends AbstractBtpPlugin {
 
           await this._balances.load(account)
           await this._balances.load(account + ':claim')
+          await this._balances.load(account + ':block')
           await this._balances.load(account + ':client_channel')
           await this._balances.load(account + ':outgoing_balance')
           const existingClientChannel = this._balances.get(account + ':client_channel')
@@ -154,6 +197,7 @@ class Plugin extends AbstractBtpPlugin {
             const paychan = await this._api.getPaymentChannel(existingChannel)
             this._validatePaychanDetails(paychan)
             this._paychans.set(account, paychan)
+            this._channelToAccount.set(existingChannel, account)
           }
 
           if (existingClientChannel) {
@@ -178,6 +222,8 @@ class Plugin extends AbstractBtpPlugin {
           // clean up paychan info when all connections close
           // TODO: way to clean up ephemeral balance or balance cache?
           if (this._connections.get(account).size === 0) {
+            const deleteChannelId = this._paychans.get(account)
+            this._channelToAccount.delete(deleteChannelId)
             this._paychans.delete(account)
           }
 
@@ -322,6 +368,7 @@ class Plugin extends AbstractBtpPlugin {
       const paychan = await this._api.getPaymentChannel(channel)
       this._validatePaychanDetails(paychan)
       this._paychans.set(account, paychan)
+      this._channelToAccount.set(channel, account)
       this._balances.set(account + ':channel', channel)
       debug('registered payment channel for', account)
     }
@@ -355,6 +402,10 @@ class Plugin extends AbstractBtpPlugin {
     const account = ilpAddressToAccount(this._prefix, transfer.to)
     const clientChannel = this._balances.get(account + ':client_channel')
 
+    if (this._balances.get(account + ':block')) {
+      throw new Error('This destination account has been closed.')
+    }
+
     if (!clientChannel) {
       throw new Error('No client channel established for account ' + account)
     }
@@ -365,6 +416,10 @@ class Plugin extends AbstractBtpPlugin {
     if (!paychan) {
       throw new Error(`Incoming traffic won't be accepted until a channel to
         the connector is established`)
+    }
+
+    if (this._balances.get(account + ':block')) {
+      throw new Error('This account has been closed.')
     }
 
     const prepare = btpPacket.data

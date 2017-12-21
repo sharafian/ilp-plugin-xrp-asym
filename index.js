@@ -11,6 +11,7 @@ const base64url = require('base64url')
 const nacl = require('tweetnacl')
 const util = require('./util')
 const OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP = '10' // TODO: something lower?
+const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 
 class Plugin extends AbstractBtpPlugin {
   constructor (opts) {
@@ -158,6 +159,13 @@ class Plugin extends AbstractBtpPlugin {
           accounts: [ this._address ]
         })
 
+        this._watcher = new ChannelWatcher(60 * 1000, this._api)
+        this._watcher.on('close', () => {
+          debug('channel closing; triggering auto-disconnect')
+          // TODO: should we also close our own channel?
+          this._disconnect()
+        })
+
         // TODO: is this an attack vector, if not telling the plugin about their channel
         // causes them to open another channel?
 
@@ -246,6 +254,7 @@ class Plugin extends AbstractBtpPlugin {
           }
 
           debug('loaded best claim of', this._bestClaim)
+          this._watcher.watch(this._clientChannel)
         }
 
         // finished the connect process
