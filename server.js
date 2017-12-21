@@ -12,6 +12,7 @@ const StoreWrapper = require('./store-wrapper')
 const base64url = require('base64url')
 const bignum = require('bignum')
 const OUTGOING_CHANNEL_DEFAULT_AMOUNT = Math.pow(10, 6) // 1 XRP
+const MIN_INCOMING_CHANNEL = 10000000
 const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const util = require('./util')
 const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
@@ -489,7 +490,7 @@ class Plugin extends AbstractBtpPlugin {
         address: this._address,
         secret: this._secret,
         // TODO: configurable fund amount?
-        amount: util.xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT)
+        amount: OUTGOING_CHANNEL_DEFAULT_AMOUNT
       })
         .then(async () => {
           this._funding.set(account, false)

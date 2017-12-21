@@ -56,12 +56,12 @@ async function run () {
     await clientPlugin.sendTransfer({
       id: '0928cea4-5871-b31e-86f5-e1d741676a74',
       to: serverPlugin.getAccount(),
-      amount: '1000',
+      amount: '100000',
       executionCondition: condition,
       expiresAt: new Date(Date.now() + 10 * 1000),
       ilp: IlpPacket.serializeIlpPayment({
         account: serverPlugin.getAccount(),
-        amount: '1000'
+        amount: '100000'
       })
     })
 
@@ -93,12 +93,12 @@ async function run () {
     await serverPlugin.sendTransfer({
       id: '0928cea4-5871-b31e-86f5-e1d741676a74',
       to: clientPlugin.getAccount(),
-      amount: '1000',
+      amount: '100000',
       executionCondition: condition,
       expiresAt: new Date(Date.now() + 10 * 1000),
       ilp: IlpPacket.serializeIlpPayment({
         account: clientPlugin.getAccount(),
-        amount: '1000'
+        amount: '100000'
       })
     })
 
@@ -108,11 +108,16 @@ async function run () {
   console.log('preparing to send payment server -> client')
   await serverToClient()
 
-  //console.log('disconnecting server')
-  //await serverPlugin.disconnect()
+  await new Promise((resolve) => setTimeout(resolve, 10000))
 
   console.log('disconnecting client')
   await clientPlugin.disconnect()
+
+  console.log('disconnecting server')
+  await serverPlugin.disconnect()
+
+  console.log('done')
+  process.exit(0)
 }
 
 run()

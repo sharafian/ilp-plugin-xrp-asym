@@ -504,7 +504,7 @@ class Plugin extends AbstractBtpPlugin {
     try { 
       await new Promise(resolve => this._ws.send(BtpPacket.serialize(btpPacket), resolve))
     } catch (e) {
-      debug('unable to send btp message to client: ' + errorInfo, 'btp packet:', JSON.stringify(btpPacket))
+      debug('unable to send btp message to client: ' + e.message, 'btp packet:', JSON.stringify(btpPacket))
     }
   }
 }

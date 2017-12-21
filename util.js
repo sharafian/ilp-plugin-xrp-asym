@@ -30,6 +30,7 @@ function computeChannelId (src, dest, sequence) {
     .digest()
     .slice(0, 32) // first half sha512
     .toString('hex')
+    .toUpperCase()
 } 
 
 function encodeClaim (amount, id) {
@@ -96,7 +97,7 @@ async function fundChannel ({ api, channel, amount, address, secret }) {
       }
 
       debug('funded channel')
-      setImmediate(() => self.api.connection
+      setImmediate(() => api.connection
         .removeListener('transaction', handleTransaction))
 
       resolve()
