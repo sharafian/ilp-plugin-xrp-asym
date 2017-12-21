@@ -261,7 +261,7 @@ class Plugin extends AbstractBtpPlugin {
     return null
   }
 
-  disconnect () {
+  async disconnect () {
     if (this._wss) {
       return new Promise(resolve => {
         this._wss.close(resolve)

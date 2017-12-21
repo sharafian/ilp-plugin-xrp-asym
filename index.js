@@ -243,6 +243,7 @@ class Plugin extends AbstractBtpPlugin {
           this._bestClaim = {
             amount: xrpToDrops(this._paychan.balance)
           }
+          debug('loaded best claim of', this._bestClaim)
         }
 
         // finished the connect process
@@ -276,12 +277,44 @@ class Plugin extends AbstractBtpPlugin {
     })
   }
 
-  disconnect () {
+  async disconnect () {
     if (this._ws) {
-      return new Promise(resolve => {
-        this._ws.close(resolve)
-        this._ws = null
+      // bind error to no-op so that it doesn't crash before we
+      // submit our claim
+      this._ws.on('error', e => {
+        debug('ws error:', e.message)
       })
+
+      await Promise.race([
+        new Promise(resolve => {
+          this._ws.close(1000, 'disconnect', resolve)
+          this._ws = null
+        }),
+        new Promise(resolve => setTimeout(resolve, 10))
+      ])
+
+      if (this._bestClaim.amount === '0') return
+      if (this._bestClaim.amount === xrpToDrops(this._paychan.balance)) return
+
+      debug('creating claim tx')
+      const claimTx = await this._api.preparePaymentChannelClaim(this._address, {
+        balance: dropsToXrp(this._bestClaim.amount),
+        channel: this._clientChannel,
+        signature: this._bestClaim.signature.toUpperCase(),
+        publicKey: this._paychan.publicKey
+      })
+
+      debug('signing claim transaction')
+      const signedTx = this._api.sign(claimTx.txJSON, this._secret)
+
+      debug('submitting claim transaction ', claimTx)
+      const {resultCode, resultMessage} = await this._api.submit(signedTx.signedTransaction)
+      if (resultCode !== 'tesSUCCESS') {
+        console.error('WARNING: Error submitting claim: ', resultMessage)
+        throw new Error('Could not claim funds: ', resultMessage)
+      }
+
+      debug('done')
     }
   }
 
@@ -364,6 +397,7 @@ class Plugin extends AbstractBtpPlugin {
         return
       }
 
+      debug('got new best claim for', amount)
       this._unsecured = this._unsecured.sub(transfer.amount)
       this._bestClaim = { amount, signature }
     }

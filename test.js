@@ -83,6 +83,7 @@ async function run () {
       await clientPlugin.fulfillCondition(transfer.id, fulfillment)
       console.log('fulfilled!')
       setImmediate(() => clientPlugin.removeListener('incoming_prepare', handle))
+      completed()
     }
 
     clientPlugin.on('incoming_prepare', handle)
@@ -104,6 +105,12 @@ async function run () {
 
   console.log('preparing to send payment server -> client')
   await serverToClient()
+
+  console.log('disconnecting server')
+  await serverPlugin.disconnect()
+
+  console.log('disconnecting client')
+  await clientPlugin.disconnect()
 }
 
 run()

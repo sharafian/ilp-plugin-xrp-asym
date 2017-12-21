@@ -15,7 +15,7 @@ const plugin = new IlpPluginXrpStateless({
 - [x] sign higher version of last claim on outgoing fulfill
 - [x] verify claim on incoming fulfill
 - [ ] verify channel details on connect
-- [ ] submit claim on close
+- [x] submit claim on close
 - [ ] cache claim somewhere in case of crash
 - [x] load channel balance at connect to determine best claim
 - [ ] load cache at connect to determine best claim
