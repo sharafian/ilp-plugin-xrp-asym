@@ -140,7 +140,7 @@ class Plugin extends AbstractBtpPlugin {
   async connect () {
     if (this._wss) return
     
-    this._watcher.on('close', this._channelClose)
+    this._watcher.on('channelClose', this._channelClose)
 
     await this._api.connect()
     await this._api.connection.request({

@@ -160,7 +160,7 @@ class Plugin extends AbstractBtpPlugin {
         })
 
         this._watcher = new ChannelWatcher(60 * 1000, this._api)
-        this._watcher.on('close', () => {
+        this._watcher.on('channelClose', () => {
           debug('channel closing; triggering auto-disconnect')
           // TODO: should we also close our own channel?
           this._disconnect()
