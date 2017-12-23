@@ -10,12 +10,6 @@ const base64url = require('base64url')
 const { protocolDataToIlpAndCustom, ilpAndCustomToProtocolData } =
   require('./protocol-data-converter')
 
-const errors = require('./errors')
-const MissingFulfillmentError = errors.MissingFulfillmentError
-const NotAcceptedError = errors.NotAcceptedError
-const InvalidFieldsError = errors.InvalidFieldsError
-const AlreadyRolledBackError = errors.AlreadyRolledBackError
-const RequestHandlerAlreadyRegisteredError = errors.RequestHandlerAlreadyRegisteredError
 
 const int64 = require('./long')
 
@@ -84,11 +78,8 @@ class AbstractBtpPlugin extends EventEmitter {
   constructor () {
     super()
 
-    this._requestHandler = null
-
-    // TODO: Should clean up expired transfers from these maps
-    this._incomingTransfers = new Map()
-    this._outgoingTransfers = new Map()
+    this._dataHandler = null
+    this._moneyHandler = null
   }
 
   // don't throw errors even if the event handler throws
@@ -101,12 +92,6 @@ class AbstractBtpPlugin extends EventEmitter {
       const errInfo = (typeof err === 'object' && err.stack) ? err.stack : String(err)
       debug('error in handler for event', arguments, errInfo)
     }
-  }
-
-  async getFulfillment (transferId) {
-    // We don't store transfers past their execution, so we will never have a
-    // fulfillment for an already executed transfer.
-    throw new MissingFulfillmentError()
   }
 
   async _call (to, btpPacket) {
@@ -161,16 +146,16 @@ class AbstractBtpPlugin extends EventEmitter {
           this.emit('__callback_' + requestId, type, data)
           return
         case BtpPacket.TYPE_PREPARE:
-          result = await this._handleTransfer(from, btpPacket)
-          break
         case BtpPacket.TYPE_FULFILL:
-          result = await this._handleFulfillCondition(from, btpPacket)
-          break
         case BtpPacket.TYPE_REJECT:
-          result = await this._handleRejectIncomingTransfer(from, btpPacket)
+          throw new Error('Unsupported BTP packet') 
+
+        case BtpPacket.TYPE_TRANSFER:
+          result = await this._handleMoney(from, btpPacket)
           break
+
         case BtpPacket.TYPE_MESSAGE:
-          result = await this._handleRequest(from, btpPacket)
+          result = await this._handleData(from, btpPacket)
           break
       }
 
@@ -201,92 +186,8 @@ class AbstractBtpPlugin extends EventEmitter {
     }
   }
 
-  async sendTransfer (transfer) {
-    const {id, amount, executionCondition, expiresAt} = transfer
-    const protocolData = ilpAndCustomToProtocolData(transfer)
-    const requestId = await _requestId()
-
-    this._outgoingTransfers.set(transfer.id, transfer)
-
-    if (this._handleOutgoingPrepare) {
-      this._handleOutgoingPrepare(transfer)
-    }
-
-    this._safeEmit('outgoing_prepare', transfer)
-
-    await this._call(transfer.to, {
-      type: BtpPacket.TYPE_PREPARE,
-      requestId,
-      data: {
-        transferId: id,
-        amount,
-        executionCondition,
-        expiresAt,
-        protocolData
-      }
-    })
-
-    return null
-  }
-
-  async _handleTransfer (from, { data }) {
-    const { ilp, custom } = protocolDataToIlpAndCustom(data)
-    const transfer = {
-      id: data.transferId,
-      amount: data.amount,
-      executionCondition: data.executionCondition,
-      expiresAt: data.expiresAt.toISOString(),
-      to: this.getAccount(),
-      from,
-      ledger: this._prefix
-    }
-
-    if (ilp) transfer.ilp = ilp
-    if (custom) transfer.custom = custom
-
-    this._incomingTransfers.set(transfer.id, transfer)
-
-    this._safeEmit('incoming_prepare', transfer)
-  }
-
-  async sendRequest (message) {
-    const protocolData = ilpAndCustomToProtocolData(message)
-    const requestId = await _requestId()
-
-    this._safeEmit('outgoing_request', message)
-
-    const btpResponse = await this._call(message.to, {
-      type: BtpPacket.TYPE_MESSAGE,
-      requestId,
-      data: { protocolData }
-    })
-
-    const { ilp, custom } = protocolDataToIlpAndCustom(btpResponse)
-
-    const parsed = {
-      to: message.from,
-      from: message.to,
-      ledger: this.getInfo().prefix
-    }
-
-    if (ilp) parsed.ilp = ilp
-    if (custom) parsed.custom = custom
-
-    this._safeEmit('incoming_response', parsed)
-
-    return parsed
-  }
-
-  async _handleRequest (from, {requestId, data}) {
-    const { ilp, custom, protocolMap } = protocolDataToIlpAndCustom(data)
-    const message = {
-      id: requestId,
-      to: this.getAccount(),
-      from
-    }
-
-    if (ilp) message.ilp = ilp
-    if (custom) message.custom = custom
+  async _handleData (from, {requestId, data}) {
+    const { ilp, protocolMap } = protocolDataToIlpAndCustom(data)
 
     // if there are side protocols only
     if (!ilp) {
@@ -341,190 +242,59 @@ class AbstractBtpPlugin extends EventEmitter {
       }
     }
 
-    this._safeEmit('incoming_request', message)
-
-    if (!this._requestHandler) {
+    if (!this._dataHandler) {
       throw new NotAcceptedError('no request handler registered')
     }
 
-    const response = await this._requestHandler(message)
-      .catch((e) => ({
-        ledger: message.ledger,
-        to: from,
-        from: this.getAccount(),
-        ilp: base64url(IlpPacket.serializeIlpError({
-          code: 'F00',
-          name: 'Bad Request',
-          triggeredBy: this.getAccount(),
-          forwardedBy: [],
-          triggeredAt: new Date(),
-          data: JSON.stringify({ message: e.message })
-        }))
-      }))
-
-    this._safeEmit('outgoing_response', response)
-
-    return ilpAndCustomToProtocolData({ ilp: response.ilp, custom: response.custom })
+    const response = await this._dataHandler(ilp)
+    return ilpAndCustomToProtocolData({ ilp: response })
   }
 
-  async fulfillCondition (transferId, fulfillment, ilp) {
-    const protocolData = ilp
-      ? [{
-        protocolName: 'ilp',
-        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-        data: Buffer.from(ilp, 'base64')
-      }]
-      : []
-    const requestId = await _requestId()
-
-    const transfer = this._getIncomingTransferById(transferId)
-
-    if (new Date(transfer.expiresAt).getTime() < Date.now()) {
-      throw new AlreadyRolledBackError(transferId + ' has already expired: ' +
-        JSON.stringify(transfer))
+  async _handleMoney (from, {requestId, data}) {
+    if (!this._moneyHandler) {
+      throw new Error('no money handler registered')
     }
 
-    if (this._getFulfillConditionProtocolData) {
-      protocolData.push(...this._getFulfillConditionProtocolData(transfer))
+    response = []
+    if (!this._handleBtpTransfer) {
+      response = await this._handleBtpTransfer(from, data) || []
     }
 
-    const response = await this._call(transfer.from, {
-      type: BtpPacket.TYPE_FULFILL,
-      requestId,
-      data: {
-        transferId,
-        fulfillment,
-        protocolData
-      }
-    })
-
-    if (this._handleIncomingFulfillResponse) {
-      this._handleIncomingFulfillResponse(transfer, response)
-    }
-
-    this._incomingTransfers.delete(transferId)
-
-    return null
+    return response
   }
 
-  async _handleFulfillCondition (from, { data }) {
-    const transferId = data.transferId
-    const { ilp } = protocolDataToIlpAndCustom(data)
-    const transfer = this._getOutgoingTransferById(transferId)
-
-    this._safeEmit('outgoing_fulfill', transfer, data.fulfillment, ilp)
-
-    this._outgoingTransfers.delete(transferId)
-
-    let protocolData = []
-    if (this._handleOutgoingFulfill) {
-      protocolData = this._handleOutgoingFulfill(transfer, data)
-    }
-
-    return protocolData
-  }
-
-  async rejectIncomingTransfer (transferId, reason) {
-    const transfer = this._getIncomingTransferById(transferId)
-    const requestId = await _requestId()
-    // reason.forwarded_by should be a string according to LPIv1
-    // but we might as well accept an array also since the ILP error
-    // expects an array
-    let forwardedBy
-    if (Array.isArray(reason.forwarded_by)) {
-      forwardedBy = reason.forwarded_by
-    } else if (typeof reason.forwarded_by === 'string') {
-      forwardedBy = [reason.forwarded_by]
-    } else {
-      forwardedBy = []
-    }
-    const rejectionReason = IlpPacket.serializeIlpError({
-      code: reason.code,
-      name: reason.name,
-      message: reason.message,
-      triggeredBy: reason.triggered_by || '',
-      forwardedBy,
-      triggeredAt: (reason.triggered_at && new Date(reason.triggered_at)) || new Date(),
-      data: (reason.additional_info && JSON.stringify(reason.additional_info)) || ''
-    })
-    const protocolData = [{
-      protocolName: 'ilp',
-      contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-      data: rejectionReason
-    }]
-
-    this._safeEmit('incoming_reject', transfer, reason)
-
-    await this._call(transfer.from, {
-      type: BtpPacket.TYPE_REJECT,
-      requestId,
-      data: {
-        transferId,
-        protocolData
-      }
-    })
-
-    this._incomingTransfers.delete(transferId)
-
-    return null
-  }
-
-  async _handleRejectIncomingTransfer (from, { data }) {
-    const { ilp } = protocolDataToIlpAndCustom(data)
-    const ilpPacket = IlpPacket.deserializeIlpPacket(Buffer.from(ilp, 'base64')).data
-
-    const rejectionReason = {
-      code: ilpPacket.code,
-      name: ilpPacket.name,
-      message: ilpPacket.message,
-      triggered_by: ilpPacket.triggeredBy,
-      forwarded_by: ilpPacket.forwardedBy,
-      triggered_at: ilpPacket.triggeredAt,
-      additional_info: ilpPacket.data
-    }
-
-    this._safeEmit('outgoing_reject', this._getOutgoingTransferById(data.transferId), rejectionReason)
-
-    this._outgoingTransfers.delete(data.id)
-  }
-
-  // TODO: This function should be deprecated from RFC-0004. Instead we should
-  // use registerSideProtocolHandler. (@sharafian)
-  registerRequestHandler (handler) {
-    if (this._requestHandler) {
-      throw new RequestHandlerAlreadyRegisteredError('requestHandler is already registered')
+  registerDataHandler (handler) {
+    if (this._dataHandler) {
+      throw new Error('requestHandler is already registered')
     }
 
     if (typeof handler !== 'function') {
-      throw new InvalidFieldsError('requestHandler must be a function')
+      throw new Error('requestHandler must be a function')
     }
 
-    debug('registering request handler')
-    this._requestHandler = handler
+    debug('registering data handler')
+    this._dataHandler = handler
   }
 
-  deregisterRequestHandler () {
-    this._requestHandler = null
+  deregisterDataHandler () {
+    this._dataHandler = null
   }
 
-  _getIncomingTransferById (transferId) {
-    const transfer = this._incomingTransfers.get(transferId)
-
-    if (transfer) {
-      return transfer
-    } else {
-      throw new Error('Unrecognized incoming transfer id ' + transferId)
+  registerMoneyHandler (handler) {
+    if (this._moneyHandler) {
+      throw new Error('requestHandler is already registered')
     }
+
+    if (typeof handler !== 'function') {
+      throw new Error('requestHandler must be a function')
+    }
+
+    debug('registering money handler')
+    this._moneyHandler = handler
   }
 
-  _getOutgoingTransferById (transferId) {
-    const transfer = this._outgoingTransfers.get(transferId)
-
-    if (transfer) {
-      return transfer
-    } else {
-      throw new Error('Unrecognized outgoing transfer id ' + transferId)
-    }
+  deregisterMoneyHandler () {
+    this._moneyHandler = null
   }
 }
 

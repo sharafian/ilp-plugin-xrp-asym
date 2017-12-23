@@ -18,8 +18,6 @@ class Plugin extends AbstractBtpPlugin {
     super()
     this._currencyScale = 6
     this._server = opts.server
-    this._unsecured = new BigNumber(0)
-    this._bandwidth = opts.bandwidth || 200
 
     if (!opts.server || !opts.secret) {
       throw new Error('opts.server and opts.secret must be specified')
@@ -342,15 +340,6 @@ class Plugin extends AbstractBtpPlugin {
     return !!this._ws
   }
 
-  _handleIncomingBtpPrepare (btpPacket) {
-    const prepare = btpPacket.data
-    const newUnsecured = this._unsecured.add(prepare.amount)
-
-    if (newUnsecured.greaterThan(this._bandwidth)) {
-      throw new Error('Insufficient bandwidth, have: ' + this._bandwidth + ' need: ' + newUnsecured)
-    }
-  }
-
   async _handleBtpMessage (from, message) {
     const protocols = message.protocolData
     if (!protocols.length) return
@@ -370,96 +359,135 @@ class Plugin extends AbstractBtpPlugin {
     }
   }
 
-  _handleOutgoingFulfill (transfer, btpData) {
-    const primary = btpData.protocolData[0]
+  async sendData (buffer) {
+    const response = await this._call(null, {
+      type: BtpPacket.TYPE_MESSAGE,
+      requestId: await util._requestId(),
+      data: { protocolData: [{
+        protocolName: 'ilp',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: buffer
+      }] }
+    })
 
-    debug('got outgoing fulfill with primary protocol', primary && primary.protocolName)
-    if (primary.protocolName === 'claim') {
-      const lastClaim = JSON.parse(primary.data.toString())
-      const encodedClaim = util.encodeClaim(lastClaim.amount, this._channel)
-
-      debug('given last claim of', lastClaim)
-
-      // If they say we haven't sent them anything yet, it doesn't matter
-      // whether they possess a valid claim to say that.
-      if (lastClaim.amount !== '0') {
-        try {
-          nacl.sign.detached.verify(
-            encodedClaim,
-            Buffer.from(lastClaim.signature, 'hex'),
-            this._keyPair.publicKey
-          )
-        } catch (err) {
-          debug('invalid claim signature for', amount)
-          return
-        }
-      } else {
-        debug('signing first claim')
-      }
-
-      const amount = new BigNumber(lastClaim.amount).add(transfer.amount).toString()
-      const newClaimEncoded = util.encodeClaim(amount, this._channel)
-      const signature = Buffer
-        .from(nacl.sign.detached(newClaimEncoded, this._keyPair.secretKey))
-        .toString('hex')
-        .toUpperCase()
-
-      const aboveThreshold = new BigNumber(util
-        .xrpToDrops(this._channelDetails.amount))
-        .div(2) // TODO: configurable threshold?
-        .lessThan(amount)
-
-      // if the claim we're signing is for more than half the channel's balance, add some funds
-      // TODO: should there be a balance check to make sure we have enough to fund the channel?
-      // TODO: should this functionality be enabled by default?
-      if (!this._funding && aboveThreshold) {
-        debug('adding funds to channel')
-        this._funding = util.fundChannel({
-          api: this._api,
-          channel: this._channel,
-          address: this._address,
-          secret: this._secret,
-          // TODO: configurable fund amount?
-          amount: util.xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP)
-        })
-          .then(async () => {
-            this._funding = false
-            // send a 'channel' call in order to refresh details
-            await this._call(null, {
-              type: BtpPacket.TYPE_MESSAGE,
-              requestId: await util._requestId(),
-              data: { protocolData: [{
-                protocolName: 'channel',
-                contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-                data: Buffer.from(this._channel, 'hex')
-              }] }
-            })
-          })
-          .catch((e) => {
-            debug('fund tx/notify failed:', e)
-            this._funding = false
-          })
-      }
-
-      return [{
-        protocolName: 'claim',
-        contentType: BtpPacket.MIME_APPLICATION_JSON,
-        data: Buffer.from(JSON.stringify({ amount, signature }))
-      }]
-    }
+    return response.protocolData
+      .filter(p => p.protocolName === 'ilp')
+      .data
   }
 
-  _handleIncomingFulfillResponse (transfer, response) {
-    const primary = response.protocolData[0]
+  async sendMoney (transferAmount) {
+    if (!this._lastClaim) {
+      const response = await this._call(null, {
+        type: BtpPacket.TYPE_MESSAGE,
+        requestId: await util._requestId(),
+        data: { protocolData: [{
+          protocolName: 'last_claim',
+          contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+          data: Buffer.from([])
+        }] }
+      })
+
+      const primary = response.protocolData[0]
+      if (primary.protocolName !== 'claim')
+      this._lastClaim = JSON.parse(primary.data.toString())
+    }
+
+    // TODO: this method of having the latest claim cached will fail on multiple clients
+    // connected to one server. It could be switched to fetch the last claim every time,
+    // but then the latency would effectively double.
+
+    debug('given last claim of', this._lastClaim)
+    const encodedClaim = util.encodeClaim(this._lastClaim.amount, this._channel)
+
+    // If they say we haven't sent them anything yet, it doesn't matter
+    // whether they possess a valid claim to say that.
+    if (this._lastClaim.amount !== '0') {
+      try {
+        nacl.sign.detached.verify(
+          encodedClaim,
+          Buffer.from(this._lastClaim.signature, 'hex'),
+          this._keyPair.publicKey
+        )
+      } catch (err) {
+        // TODO: if these get out of sync, all subsequent transfers of money will fail
+        debug('invalid claim signature for', this._lastClaim.amount)
+        throw new Error('Our last outgoing signature for ' + this._lastClaim.amount + ' is invalid')
+      }
+    } else {
+      debug('signing first claim')
+    }
+
+    const amount = new BigNumber(this._lastClaim.amount).add(transferAmount).toString()
+    const newClaimEncoded = util.encodeClaim(amount, this._channel)
+    const signature = Buffer
+      .from(nacl.sign.detached(newClaimEncoded, this._keyPair.secretKey))
+      .toString('hex')
+      .toUpperCase()
+
+    const aboveThreshold = new BigNumber(util
+      .xrpToDrops(this._channelDetails.amount))
+      .div(2) // TODO: configurable threshold?
+      .lessThan(amount)
+
+    // if the claim we're signing is for more than half the channel's balance, add some funds
+    // TODO: should there be a balance check to make sure we have enough to fund the channel?
+    // TODO: should this functionality be enabled by default?
+    if (!this._funding && aboveThreshold) {
+      debug('adding funds to channel')
+      this._funding = util.fundChannel({
+        api: this._api,
+        channel: this._channel,
+        address: this._address,
+        secret: this._secret,
+        // TODO: configurable fund amount?
+        amount: util.xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP)
+      })
+        .then(async () => {
+          this._funding = false
+          // send a 'channel' call in order to refresh details
+          await this._call(null, {
+            type: BtpPacket.TYPE_MESSAGE,
+            requestId: await util._requestId(),
+            data: { protocolData: [{
+              protocolName: 'channel',
+              contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+              data: Buffer.from(this._channel, 'hex')
+            }] }
+          })
+        })
+        .catch((e) => {
+          debug('fund tx/notify failed:', e)
+          this._funding = false
+        })
+    }
+
+    return this._call(null, {
+      type: BtpPacket.TYPE_TRANSFER,
+      requestId: await util._requestId(),
+      data: {
+        amount: transferAmount,
+        protocolData: [{
+          protocolName: 'claim',
+          contentType: BtpPacket.MIME_APPLICATION_JSON,
+          data: Buffer.from(JSON.stringify({ amount, signature }))
+        }]
+      }
+    })
+  }
+
+  _handleBtpTransfer (from, btpData) {
+    const transferAmount = btpData.amount
+    const primary = btpData.protocolData[0]
 
     if (primary.protocolName === 'claim') {
-      const nextAmount = new BigNumber(this._bestClaim.amount).add(transfer.amount)
+      const nextAmount = new BigNumber(this._bestClaim.amount).add(transferAmount)
       const { amount, signature } = JSON.parse(primary.data.toString())
       const encodedClaim = util.encodeClaim(amount, this._clientChannel)
 
       if (nextAmount.greaterThan(amount)) {
         debug('expected claim for', nextAmount.toString(), 'got', amount)
-        return
+        throw new Error('Got a claim that was too low. Expected ' +
+          nextAmount.toString() + ' got ' + amount)
       }
 
       try {
@@ -470,11 +498,10 @@ class Plugin extends AbstractBtpPlugin {
         )
       } catch (err) {
         debug('invalid claim signature for', amount)
-        return
+        throw new Error('Invalid claim signature for: ' + amount)
       }
 
       debug('got new best claim for', amount)
-      this._unsecured = this._unsecured.sub(transfer.amount)
       this._bestClaim = { amount, signature }
 
       if (this._store) {
@@ -482,22 +509,6 @@ class Plugin extends AbstractBtpPlugin {
           return this._store.put(this._clientChannel, JSON.stringify(this._bestClaim))
         })
       }
-    }
-  }
-
-  _handleIncomingReject (transfer) {
-    this._unsecured = this._unsecured.sub(transfer.amount)
-  }
-
-  getAccount () {
-    return this._account
-  }
-
-  getInfo () {
-    return {
-      prefix: this._prefix,
-      connectors: [],
-      currencyScale: this._currencyScale
     }
   }
 

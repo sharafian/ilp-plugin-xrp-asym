@@ -399,59 +399,35 @@ class Plugin extends AbstractBtpPlugin {
     return []
   }
 
-  _handleOutgoingPrepare (transfer) {
-    const account = ilpAddressToAccount(this._prefix, transfer.to)
-    const clientChannel = this._balances.get(account + ':client_channel')
-
-    if (this._balances.get(account + ':block')) {
-      throw new Error('This destination account has been closed.')
+  async sendData (buffer) {
+    let parsedPacket
+    try {
+      parsedPacket = IlpPacket.deserializeIlpPrepare()
+    } catch (e) {
+      return IlpPacket.serializeIlpReject({
+        code: 'F00',
+        message: 'invalid ILP prepare packet: ' + e.message,
+        triggeredBy: '', // TODO: make a DCP to connector using this plugin
+        data: Buffer.from([])
+      })
     }
 
-    if (!clientChannel) {
-      throw new Error('No client channel established for account ' + account)
-    }
+    const response = await this._call(parsedPacket.destinationAccount, {
+      type: BtpPacket.TYPE_MESSAGE,
+      requestId: await util._requestId(),
+      data: { protocolData: [{
+        protocolName: 'ilp',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: buffer
+      }] }
+    })
+
+    return response.protocolData
+      .filter(p => p.protocolName === 'ilp')
+      .data
   }
 
-  async _handleIncomingBtpPrepare (account, btpPacket) {
-    const paychan = this._paychans.get(account)
-    if (!paychan) {
-      throw new Error(`Incoming traffic won't be accepted until a channel to
-        the connector is established`)
-    }
-
-    if (this._balances.get(account + ':block')) {
-      throw new Error('This account has been closed.')
-    }
-
-    const prepare = btpPacket.data
-    const primary = prepare.protocolData[0]
-    if (!primary || primary.protocolName !== 'ilp') {
-      throw new Error('ILP packet is required')
-    }
-    // const ilp = IlpPacket.deserializeIlpPayment(prepare.protocolData[0].data)
-
-    const prepared = new BigNumber(this._ephemeral.get(account) || 0)
-    const lastClaim = this._getLastClaim(account)
-    const lastValue = new BigNumber(lastClaim.amount)
-
-    const newPrepared = prepared.add(prepare.amount)
-    const unsecured = newPrepared.sub(lastValue)
-    debug(unsecured.toString(), 'unsecured; last claim is', lastValue.toString(), 'prepared amount', prepare.amount, 'newPrepared', newPrepared.toString(), 'prepared', prepared.toString())
-
-    if (unsecured.greaterThan(this._bandwidth)) {
-      throw new Error('Insufficient bandwidth, used: ' + unsecured + ' max: ' + this._bandwidth)
-    }
-
-    if (newPrepared.greaterThan(util.xrpToDrops(paychan.amount))) {
-      throw new Error('Insufficient funds, have: ' + newPrepared + ' need: ' + prepare.amount)
-    }
-
-    this._ephemeral.set(account, newPrepared.toString())
-
-    debug(`account ${account} debited ${prepare.amount} units, new balance ${newPrepared}`)
-  }
-
-  _handleOutgoingFulfill (transfer) {
+  async sendMoney (transferAmount) {
     const account = ilpAddressToAccount(this._prefix, transfer.to)
     const balanceKey = account + ':outgoing_balance'
 
@@ -521,29 +497,6 @@ class Plugin extends AbstractBtpPlugin {
     }]
   }
 
-  async _handleIncomingFulfill (transfer) {
-    const account = ilpAddressToAccount(this._prefix, transfer.from)
-    const balance = new BigNumber(this._balances.get(account) || 0)
-    const newBalance = balance.add(transfer.amount)
-
-    this._balances.set(account, newBalance.toString())
-
-    debug(`account ${account} finalized ${transfer.amount} units, new balance ${newBalance}`)
-  }
-
-  _getFulfillConditionProtocolData (transfer) {
-    const account = ilpAddressToAccount(this._prefix, transfer.from)
-    const claim = this._balances.get(account + ':claim') || JSON.stringify({
-      amount: '0'
-    })
-
-    return [{
-      protocolName: 'claim',
-      contentType: BtpPacket.MIME_APPLICATION_JSON,
-      data: Buffer.from(claim)
-    }]
-  }
-
   _handleClaim (account, claim) {
     let valid = false
     const channel = this._balances.get(account + ':channel')
@@ -609,28 +562,6 @@ class Plugin extends AbstractBtpPlugin {
 
   _getLastClaim (account) {
     return JSON.parse(this._balances.get(account + ':claim') || '{"amount":"0"}')
-  }
-
-  async _handleIncomingReject (transfer) {
-    const account = ilpAddressToAccount(this._prefix, transfer.from)
-    const prepared = new BigNumber(this._ephemeral.get(account) || 0)
-    const newPrepared = prepared.sub(transfer.amount)
-
-    this._ephemeral.set(account, newPrepared.toString())
-
-    debug(`account ${account} credited ${transfer.amount} units, new balance ${newPrepared}`)
-  }
-
-  getAccount () {
-    return this._prefix + 'server'
-  }
-
-  getInfo () {
-    return {
-      prefix: this._prefix,
-      connectors: [],
-      currencyScale: this._currencyScale
-    }
   }
 
   async _handleOutgoingBtpPacket (to, btpPacket) {
