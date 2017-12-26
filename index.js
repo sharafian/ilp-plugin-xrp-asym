@@ -38,7 +38,7 @@ class Plugin extends AbstractBtpPlugin {
     this._log = opts._log || console
     this._ws = null
 
-    this.on('incoming_reject', this._handleIncomingReject.bind(this))
+    // this.on('incoming_reject', this._handleIncomingReject.bind(this))
   }
 
   async _createOutgoingChannel () {
