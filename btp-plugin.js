@@ -257,10 +257,11 @@ class AbstractBtpPlugin extends EventEmitter {
 
     response = []
     if (!this._handleBtpTransfer) {
-      response = await this._handleBtpTransfer(from, data) || []
+      return this._handleBtpTransfer(from, data) || []
     }
 
-    return response
+    const response = await this._moneyHandler(ilp)
+    return ilpAndCustomToProtocolData({ ilp: response })
   }
 
   registerDataHandler (handler) {

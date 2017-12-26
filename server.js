@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { Reader, Writer } = require('oer-utils')
 const addressCodec = require('ripple-address-codec')
 const nacl = require('tweetnacl')
 const { RippleAPI } = require('ripple-lib')
@@ -15,6 +16,7 @@ const OUTGOING_CHANNEL_DEFAULT_AMOUNT = Math.pow(10, 6) // 1 XRP
 const MIN_INCOMING_CHANNEL = 10000000
 const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const util = require('./util')
+const DEFAULT_TIMEOUT = 3000 // TODO: should this be something else?
 const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 
 function tokenToAccount (token) {
@@ -55,8 +57,10 @@ class Plugin extends AbstractBtpPlugin {
     this._connections = new Map()
     this._funding = new Map()
 
+    /*
     this.on('incoming_fulfill', this._handleIncomingFulfill.bind(this))
     this.on('incoming_reject', this._handleIncomingReject.bind(this))
+    */
 
     if (this._modeInfiniteBalances) {
       this._log.warn('(!!!) granting all users infinite balances')
@@ -348,6 +352,7 @@ class Plugin extends AbstractBtpPlugin {
 
     const fundChannel = protocols.filter(p => p.protocolName === 'fund_channel')[0]
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
+    const ilp = protocols.filter(p => protocolName === 'ilp')[0]
 
     if (channelProtocol) {
       debug('got message for incoming channel on account', account)
@@ -396,7 +401,127 @@ class Plugin extends AbstractBtpPlugin {
         data: Buffer.from(clientChannelId, 'hex')
       }]
     }
+
+    // in the case of an ilp message, we behave as a connector
+    if (ilp) {
+      if (ilp.data[0] === IlpPacket.TYPE_ILP_PREPARE) {
+        this._handleIncomingPrepare(account, ilp.data)
+      }
+
+      let response = await Promise.race([
+        this._dataHandler(ilp.data),
+        this._expireData(account, ilp.data)
+      ])
+
+      if (ilp.data[0] === IlpPacket.TYPE_ILP_PREPARE) {
+        if (response[0] === IlpPacket.TYPE_ILP_REJECT) {
+          this._rejectIncomingTransfer(account, ilp.data)
+        } else if (response[0] === IlpPacket.TYPE_ILP_FULFILL) {
+          // TODO: should await, or no?
+          const { amount, destination, data } = IlpPacket.deserializeIlpPrepare(ilp.data)
+          if (amount !== '0') this._moneyHandler(amount)
+
+          // DCP passthrough logic
+          if (destination === 'peer.config') {
+            const reader = new Reader(data)
+            const address = reader.readVarOctetString().toString()
+            const newAddress = Buffer.from(address + '.' + account)
+
+            const writer = new Writer()
+            writer.writeVarOctetString(newAddress)
+
+            const extra = reader.read(reader.buffer.length - reader.cursor)
+            writer.write(extra)
+
+            response = IlpPacket.serializeIlpFulfill(Object.assign(
+              IlpPacket.deserializeIlpFulfill(response),
+              { data: writer.getBuffer() }))
+          }
+        }
+      }
+
+      return ilpAndCustomToProtocolData({ ilp: response })
+    }
+
     return []
+  }
+
+  async _expireData (account, ilpData) {
+    const isPrepare = ilpData[0] === IlpPacket.TYPE_ILP_PREPARE
+    const expiresAt = isPrepare
+      ? IlpPacket.deserializeIlpPrepare(ilpData).expiresAt
+      : new Date(Date.now() + DEFAULT_TIMEOUT) // TODO: other timeout as default?
+
+    await new Promise((resolve) => setTimeout(resolve, expiresAt - Date.now()))
+    return isPrepare
+      ? IlpPacket.serializeIlpReject({
+          code: 'F00',
+          triggeredBy: this._prefix, // TODO: is that right?
+          message: 'expired at ' + new Date().toISOString(),
+          data: Buffer.from('')
+        })
+      : IlpPacket.serializeIlpError({
+          code: 'F00',
+          name: 'Bad Request',
+          triggeredBy: this._prefix,
+          forwardedBy: [],
+          triggeredAt: new Date(),
+          data: JSON.stringify({
+            message: `request timed out after ${DEFAULT_TIMEOUT} ms`
+          })
+        })
+  }
+
+  _handleIncomingPrepare (account, ilpData) {
+    const {
+      amount,
+      executionCondition,
+      expiresAt,
+      destination,
+      data
+    } = IlpPacket.deserializeIlpPrepare(ilpData)
+
+    const paychan = this._paychans.get(account)
+    if (!paychan) {
+      throw new Error(`Incoming traffic won't be accepted until a channel
+        to the connector is established.`)
+    }
+
+    if (this._balances.get(account + ':block')) {
+      throw new Error('This account has been closed.')
+    }
+
+    const lastClaim = this._getLastClaim(account)
+    const lastValue = new BigNumber(lastClaim.amount)
+
+    const prepared = new BigNumber(this._ephemeral.get(account))
+    const newPrepared = prepared.add(amount)
+    const unsecured = newPrepared.sub(lastValue)
+    debug(unsecured.toString(), 'unsecured; last claim is',
+      lastValue.toString(), 'prepared amount', amount, 'newPrepared',
+      newPrepared.toString(), 'prepared', prepared.toString())
+
+    if (unsecured.greaterThan(this._bandwidth)) {
+      throw new Error('Insufficient bandwidth, used: ' + unsecured + ' max: ' +
+        this._bandwidth)
+    }
+
+    if (newPrepared.greaterThan(util.xrpToDrops(paychan.amount))) {
+      throw new Error('Insufficient funds, have: ' + util.xrpToDrops(paychan.amount) +
+        ' need: ' + newPrepared.toString())
+    }
+
+    this._ephemeral.set(account, newPrepared.toString())
+    debug(`account ${account} debited ${amount} units, new balance ${newPrepared.toString()}`)
+  }
+
+  _rejectIncomingTransfer (account, ilpData) {
+    const { amount } = IlpPacket.deserializeIlpPrepare(ilpData)
+    const prepared = new BigNumber(this._ephemeral.get(account))
+    const newPrepared = prepared.sub(amount)
+
+    this._ephemeral.set(account, newPrepared)
+    debug(`account ${account} roll back ${amount} units, new balance ${newPrepared.toString()}`)
   }
 
   async sendData (buffer) {
@@ -407,12 +532,12 @@ class Plugin extends AbstractBtpPlugin {
       return IlpPacket.serializeIlpReject({
         code: 'F00',
         message: 'invalid ILP prepare packet: ' + e.message,
-        triggeredBy: '', // TODO: make a DCP to connector using this plugin
+        triggeredBy: this._prefix, // TODO: is that right?
         data: Buffer.from([])
       })
     }
 
-    const response = await this._call(parsedPacket.destinationAccount, {
+    const response = await this._call(parsedPacket.destination, {
       type: BtpPacket.TYPE_MESSAGE,
       requestId: await util._requestId(),
       data: { protocolData: [{
@@ -422,22 +547,56 @@ class Plugin extends AbstractBtpPlugin {
       }] }
     })
 
+    const ilpResponse = response.filter(p => p.protocolName === 'ilp').data
+    if (ilpResponse[0] === IlpPacket.TYPE_ILP_FULFILL) {
+      const parsedResponse = IlpPacket.deserializeIlpFulfill(ilpResponse)
+      if (crypto.createHash('sha256')
+        .update(parsedResponse.fulfillment)
+        .digest()
+        .equals(parsedPacket.executionCondition)) {
+          return IlpPacket.serializeIlpReject({
+            code: 'F00',
+            message: 'invalid ILP prepare packet: ' + e.message,
+            triggeredBy: this._prefix, // TODO: is that right?
+            data: Buffer.from([])
+          })
+      }
+
+      try {
+        await this._call(parsedPacket.destination, {
+          type: BtpPacket.TYPE_TRANSFER,
+          requestId: await util.requestId(),
+          data: { protocolData: this._sendMoneyToAccount(
+            parsedPacket.amount,
+            parsedPacket.destination)
+          }
+        })
+      } catch (e) {
+        debug(`failed to pay account ${parsedPacket.destinationAccount}:
+          ${e.message}`)
+      }
+    }
+
     return response.protocolData
       .filter(p => p.protocolName === 'ilp')
       .data
   }
 
-  async sendMoney (transferAmount) {
-    const account = ilpAddressToAccount(this._prefix, transfer.to)
+  async sendMoney () {
+    // NO-OP
+  }
+
+  _sendMoneyToAccount (transferAmount, to) {
+    const account = ilpAddressToAccount(this._prefix, to)
     const balanceKey = account + ':outgoing_balance'
 
     const currentBalance = new BigNumber(this._balances.get(balanceKey) || 0)
-    const newBalance = currentBalance.add(transfer.amount)
+    const newBalance = currentBalance.add(transferAmount)
 
     // TODO: fund if above a certain threshold (50%?)
 
     this._balances.set(balanceKey, newBalance.toString())
-    debug(`account ${balanceKey} added ${transfer.amount} units, new balance ${newBalance}`)
+    debug(`account ${balanceKey} added ${transferAmount} units, new balance ${newBalance}`)
 
     // sign a claim
     const channel = this._balances.get(account + ':client_channel')
@@ -471,7 +630,7 @@ class Plugin extends AbstractBtpPlugin {
         .then(async () => {
           this._funding.set(account, false)
           debug('completed fund tx for account', account)
-          await this._call(transfer.to, {
+          await this._call(this._prefix + account, {
             type: BtpPacket.TYPE_MESSAGE,
             requestId: await util._requestId(),
             data: { protocolData: [{
@@ -538,26 +697,22 @@ class Plugin extends AbstractBtpPlugin {
     debug('set new claim for amount', amount)
   }
 
-  // TODO: handle incoming fulfill response
-  _handleIncomingFulfillResponse (transfer, response) {
-    const account = ilpAddressToAccount(this._prefix, transfer.from)
+  _handleBtpTransfer (from, btpData) {
+    const account = ilpAddressToAccount(this._prefix, from)
 
-    console.log('response:', response)
-    const [ jsonClaim ] = response.protocolData
+    // TODO: match the transfer amount
+    console.log('transfer:', btpData)
+    const [ jsonClaim ] = btpData.protocolData
       .filter(p => p.protocolName === 'claim')
     const claim = JSON.parse(jsonClaim.data.toString())
     console.log('claim:', claim)
 
     if (!claim) {
-      debug('no claim was returned with transfer id=' + transfer.id)
-      return
+      debug('no claim was supplied on transfer')
+      throw new Error('No claim was supplied on transfer') 
     }
 
-    try {
-      this._handleClaim(account, claim)
-    } catch (e) {
-      debug(e.message)
-    }
+    this._handleClaim(account, claim)
   }
 
   _getLastClaim (account) {
