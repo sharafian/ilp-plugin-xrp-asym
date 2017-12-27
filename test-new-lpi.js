@@ -30,8 +30,20 @@ const clientPlugin = new IlpPluginXrpStateless({
   // xrpServer: 'wss://s.altnet.rippletest.net:51233'
 })
 
+async function connect () {
+  await serverPlugin.connect()
+  await clientPlugin.connect()
+}
+
 async function run (sender, receiver) {
-  await receiver.connect()
+
+  sender.deregisterMoneyHandler()
+  receiver.deregisterMoneyHandler()
+  sender.deregisterDataHandler()
+  receiver.deregisterDataHandler()
+  sender.registerMoneyHandler(() => {})
+  receiver.registerMoneyHandler(() => {})
+
   console.log('receiver connected')
 
   const receiverSecret = Buffer.from('secret_seed')
@@ -50,8 +62,8 @@ async function run (sender, receiver) {
 
     console.log('fulfilling.')
     stopListening()
-    // return params.fulfill()
-    throw new Error('I don\'t like it')
+    return params.fulfill()
+    // throw new Error('I don\'t like it')
   })
 
   // the sender can generate these, via the sharedSecret and destinationAccount
@@ -81,13 +93,19 @@ async function run (sender, receiver) {
   } else if (response[0] === IlpPacket.Type.TYPE_ILP_FULFILL) {
     const fulfillInfo = IlpPacket.deserializeIlpFulfill(response)
     console.log('fulfillment:', fulfillInfo.fulfillment.toString('base64'))
+
+    console.log('sending money now')
+    await sender.sendMoney(quote.sourceAmount)
+    console.log('money sent!')
   }
 
   console.log('transfer sent')
 }
 
-run(clientPlugin, serverPlugin)
+connect()
+  .then(() => run(clientPlugin, serverPlugin))
   .then(() => run(serverPlugin, clientPlugin))
+  //run(serverPlugin, clientPlugin)
   .catch(err => {
     console.log((typeof err === 'object' && err.stack)
       ? err.stack

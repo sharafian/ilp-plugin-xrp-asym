@@ -17,7 +17,7 @@ const OUTGOING_CHANNEL_DEFAULT_AMOUNT = Math.pow(10, 6) // 1 XRP
 const MIN_INCOMING_CHANNEL = 10000000
 const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const util = require('./util')
-const DEFAULT_TIMEOUT = 3000 // TODO: should this be something else?
+const DEFAULT_TIMEOUT = 30000 // TODO: should this be something else?
 const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 const { protocolDataToIlpAndCustom, ilpAndCustomToProtocolData } =
   require('./protocol-data-converter')
@@ -355,10 +355,20 @@ class Plugin extends AbstractBtpPlugin {
     const protocols = message.protocolData
     if (!protocols.length) return
 
+    const getLastClaim = protocols.filter(p => p.protocolName === 'last_claim')[0]
     const fundChannel = protocols.filter(p => p.protocolName === 'fund_channel')[0]
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
     const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
     console.log("GOT PROTOCOLS", protocols)
+
+    if (getLastClaim) {
+      debug('got request for last claim:', this._getLastClaim(account))
+      return [{
+        protocolName: 'last_claim',
+        contentType: BtpPacket.MIME_APPLICATION_JSON,
+        data: Buffer.from(JSON.stringify(this._getLastClaim(account)))
+      }]
+    }
 
     if (channelProtocol) {
       debug('got message for incoming channel on account', account)
@@ -446,7 +456,7 @@ class Plugin extends AbstractBtpPlugin {
         } else if (response[0] === IlpPacket.Type.TYPE_ILP_FULFILL) {
           // TODO: should await, or no?
           const { amount, destination, data } = IlpPacket.deserializeIlpPrepare(ilp.data)
-          if (amount !== '0') this._moneyHandler(amount)
+          if (amount !== '0' && this._moneyHandler) this._moneyHandler(amount)
 
           // DCP passthrough logic
           if (destination === 'peer.config') {
@@ -591,39 +601,44 @@ class Plugin extends AbstractBtpPlugin {
       }] }
     })
 
-    const ilpResponse = response.filter(p => p.protocolName === 'ilp').data
+    const ilpResponse = response.protocolData.filter(p => p.protocolName === 'ilp')[0].data
     if (ilpResponse[0] === IlpPacket.Type.TYPE_ILP_FULFILL) {
       const parsedResponse = IlpPacket.deserializeIlpFulfill(ilpResponse)
-      if (crypto.createHash('sha256')
+      if (!crypto.createHash('sha256')
         .update(parsedResponse.fulfillment)
         .digest()
         .equals(parsedPacket.executionCondition)) {
           console.log('REJECTING FROM INVALID FULFILLMENT AND CONDITION PAIR')
           return IlpPacket.serializeIlpReject({
             code: 'F00',
-            message: 'invalid ILP prepare packet: ' + e.message,
+            message: 'condition and fulfillment do not match. condition=' +
+              parsedPacket.executionCondition.toString('base64') + '. fulfillment=' +
+              parsedResponse.fulfillment.toString('base64') + '.',
             triggeredBy: this._prefix, // TODO: is that right?
             data: Buffer.from([])
           })
       }
 
       try {
+        console.log('trying to call with:', parsedPacket)
         await this._call(parsedPacket.destination, {
           type: BtpPacket.TYPE_TRANSFER,
-          requestId: await util.requestId(),
-          data: { protocolData: this._sendMoneyToAccount(
-            parsedPacket.amount,
-            parsedPacket.destination)
+          requestId: await util._requestId(),
+          data: {
+            amount: parsedPacket.amount,
+            protocolData: this._sendMoneyToAccount(
+              parsedPacket.amount,
+              parsedPacket.destination)
           }
         })
       } catch (e) {
-        debug(`failed to pay account ${parsedPacket.destinationAccount}:
+        debug(`failed to pay account ${parsedPacket.destination}:
           ${e.message}`)
       }
     }
 
     return response.protocolData
-      .filter(p => p.protocolName === 'ilp')
+      .filter(p => p.protocolName === 'ilp')[0]
       .data
   }
 
