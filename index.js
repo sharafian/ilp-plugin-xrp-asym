@@ -438,7 +438,7 @@ class Plugin extends AbstractBtpPlugin {
 
     const aboveThreshold = new BigNumber(util
       .xrpToDrops(this._channelDetails.amount))
-      .div(2) // TODO: configurable threshold?
+      .minus(util.xrpToDrops(OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP / 2))
       .lessThan(amount)
 
     // if the claim we're signing is for more than half the channel's balance, add some funds

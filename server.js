@@ -657,7 +657,7 @@ class Plugin extends AbstractBtpPlugin {
 
     const aboveThreshold = new BigNumber(util
       .xrpToDrops(this._clientPaychans.get(account).amount))
-      .div(2) // TODO: configurable threshold?
+      .minus(OUTGOING_CHANNEL_DEFAULT_AMOUNT / 2)
       .lessThan(newBalance.toString())
 
     // if the claim we're signing is for more than half the channel's balance, add some funds
@@ -770,7 +770,6 @@ class Plugin extends AbstractBtpPlugin {
     }
 
     const account = ilpAddressToAccount(this._prefix, to)
-
     const connections = this._connections.get(account)
 
     if (!connections) {
