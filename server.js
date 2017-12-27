@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const IlpPacket = require('ilp-packet')
 const { Reader, Writer } = require('oer-utils')
 const addressCodec = require('ripple-address-codec')
 const nacl = require('tweetnacl')
@@ -7,7 +8,7 @@ const BtpPacket = require('btp-packet')
 const BigNumber = require('bignumber.js')
 const WebSocket = require('ws')
 const assert = require('assert')
-const debug = require('debug')('ilp-plugin-multi-xrp-paychan')
+const debug = require('debug')('ilp-plugin-xrp-stateless:server')
 const AbstractBtpPlugin = require('./btp-plugin')
 const StoreWrapper = require('./store-wrapper')
 const base64url = require('base64url')
@@ -18,6 +19,8 @@ const CHANNEL_KEYS = 'ilp-plugin-multi-xrp-paychan-channel-keys'
 const util = require('./util')
 const DEFAULT_TIMEOUT = 3000 // TODO: should this be something else?
 const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
+const { protocolDataToIlpAndCustom, ilpAndCustomToProtocolData } =
+  require('./protocol-data-converter')
 
 function tokenToAccount (token) {
   return base64url(crypto.createHash('sha256').update(token).digest('sha256'))
@@ -33,7 +36,7 @@ function ilpAddressToAccount (prefix, ilpAddress) {
 
 class Plugin extends AbstractBtpPlugin {
   constructor (opts) {
-    super()
+    super(debug)
     this._prefix = opts.prefix
     this._port = opts.port || 3000
     this._wsOpts = opts.wsOpts || { port: this._port }
@@ -66,6 +69,8 @@ class Plugin extends AbstractBtpPlugin {
       this._log.warn('(!!!) granting all users infinite balances')
     }
   }
+
+  sendTransfer () {}
 
   _validatePaychanDetails (paychan) {
     const settleDelay = paychan.settleDelay
@@ -352,7 +357,8 @@ class Plugin extends AbstractBtpPlugin {
 
     const fundChannel = protocols.filter(p => p.protocolName === 'fund_channel')[0]
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
-    const ilp = protocols.filter(p => protocolName === 'ilp')[0]
+    const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
+    console.log("GOT PROTOCOLS", protocols)
 
     if (channelProtocol) {
       debug('got message for incoming channel on account', account)
@@ -404,25 +410,47 @@ class Plugin extends AbstractBtpPlugin {
 
     // in the case of an ilp message, we behave as a connector
     if (ilp) {
-      if (ilp.data[0] === IlpPacket.TYPE_ILP_PREPARE) {
+      console.log("GOT PREPARE")
+      if (ilp.data[0] === IlpPacket.Type.TYPE_ILP_PREPARE) {
+        console.log("HANDLE INCOMING PREPARE")
         this._handleIncomingPrepare(account, ilp.data)
       }
 
+      // TODO: don't do this, use connector only instead
+      if (ilp.data[0] === IlpPacket.Type.TYPE_ILP_PREPARE && IlpPacket.deserializeIlpPrepare(ilp.data).destination === 'peer.config') {
+        console.log("RESPONDING TO ILDCP instead")
+        const writer = new Writer()
+        const response = this._prefix + account
+        writer.writeVarOctetString(Buffer.from(response))
+
+        console.log("ILDCP RESPONSE", writer.getBuffer())
+        return [{
+          protocolName: 'ilp',
+          contentType: BtpPacket.MIME_APPLICATION_OCTET_STRING,
+          data: IlpPacket.serializeIlpFulfill({
+            fulfillment: Buffer.alloc(32),
+            data: writer.getBuffer()
+          })
+        }]
+      }
+
+      console.log("CALLING DATA HANDLER")
       let response = await Promise.race([
         this._dataHandler(ilp.data),
         this._expireData(account, ilp.data)
       ])
 
-      if (ilp.data[0] === IlpPacket.TYPE_ILP_PREPARE) {
-        if (response[0] === IlpPacket.TYPE_ILP_REJECT) {
+      if (ilp.data[0] === IlpPacket.Type.TYPE_ILP_PREPARE) {
+        if (response[0] === IlpPacket.Type.TYPE_ILP_REJECT) {
           this._rejectIncomingTransfer(account, ilp.data)
-        } else if (response[0] === IlpPacket.TYPE_ILP_FULFILL) {
+        } else if (response[0] === IlpPacket.Type.TYPE_ILP_FULFILL) {
           // TODO: should await, or no?
           const { amount, destination, data } = IlpPacket.deserializeIlpPrepare(ilp.data)
           if (amount !== '0') this._moneyHandler(amount)
 
           // DCP passthrough logic
           if (destination === 'peer.config') {
+            console.log("RESPONDING TO OTHER ILDCP AFTER DATA HANDLER")
             const reader = new Reader(data)
             const address = reader.readVarOctetString().toString()
             const newAddress = Buffer.from(address + '.' + account)
@@ -447,12 +475,13 @@ class Plugin extends AbstractBtpPlugin {
   }
 
   async _expireData (account, ilpData) {
-    const isPrepare = ilpData[0] === IlpPacket.TYPE_ILP_PREPARE
+    const isPrepare = ilpData[0] === IlpPacket.Type.TYPE_ILP_PREPARE
     const expiresAt = isPrepare
       ? IlpPacket.deserializeIlpPrepare(ilpData).expiresAt
       : new Date(Date.now() + DEFAULT_TIMEOUT) // TODO: other timeout as default?
 
     await new Promise((resolve) => setTimeout(resolve, expiresAt - Date.now()))
+    console.log("GIVING EXPIRY")
     return isPrepare
       ? IlpPacket.serializeIlpReject({
           code: 'F00',
@@ -494,7 +523,7 @@ class Plugin extends AbstractBtpPlugin {
     const lastClaim = this._getLastClaim(account)
     const lastValue = new BigNumber(lastClaim.amount)
 
-    const prepared = new BigNumber(this._ephemeral.get(account))
+    const prepared = new BigNumber(this._ephemeral.get(account) || '0')
     const newPrepared = prepared.add(amount)
     const unsecured = newPrepared.sub(lastValue)
     debug(unsecured.toString(), 'unsecured; last claim is',
@@ -527,13 +556,28 @@ class Plugin extends AbstractBtpPlugin {
   async sendData (buffer) {
     let parsedPacket
     try {
-      parsedPacket = IlpPacket.deserializeIlpPrepare()
+      parsedPacket = IlpPacket.deserializeIlpPrepare(buffer)
     } catch (e) {
+      console.log("REJECTING INVALID PREPARE")
       return IlpPacket.serializeIlpReject({
         code: 'F00',
         message: 'invalid ILP prepare packet: ' + e.message,
         triggeredBy: this._prefix, // TODO: is that right?
         data: Buffer.from([])
+      })
+    }
+
+    console.log("PARSED PACKET", parsedPacket)
+    // DCP; TODO: this shouldn't really be called on a server plugin
+    if (parsedPacket.destination === 'peer.config') {
+      console.log("RETURNING ILDCP RESPONSE")
+      const writer = new Writer()
+      const response = this._prefix.substring(0, this._prefix.length - 1)
+      writer.writeVarOctetString(Buffer.from(response))
+
+      return IlpPacket.serializeIlpFulfill({
+        fulfillment: Buffer.alloc(32),
+        data: writer.getBuffer()
       })
     }
 
@@ -548,12 +592,13 @@ class Plugin extends AbstractBtpPlugin {
     })
 
     const ilpResponse = response.filter(p => p.protocolName === 'ilp').data
-    if (ilpResponse[0] === IlpPacket.TYPE_ILP_FULFILL) {
+    if (ilpResponse[0] === IlpPacket.Type.TYPE_ILP_FULFILL) {
       const parsedResponse = IlpPacket.deserializeIlpFulfill(ilpResponse)
       if (crypto.createHash('sha256')
         .update(parsedResponse.fulfillment)
         .digest()
         .equals(parsedPacket.executionCondition)) {
+          console.log('REJECTING FROM INVALID FULFILLMENT AND CONDITION PAIR')
           return IlpPacket.serializeIlpReject({
             code: 'F00',
             message: 'invalid ILP prepare packet: ' + e.message,
@@ -724,6 +769,8 @@ class Plugin extends AbstractBtpPlugin {
       throw new Error('Invalid destination "' + to + '", must start with prefix: ' + this._prefix)
     }
 
+    console.log('SERVER SENDING OUTGOING PACKET', JSON.stringify(btpPacket))
+
     const account = ilpAddressToAccount(this._prefix, to)
 
     const connections = this._connections.get(account)
@@ -747,4 +794,5 @@ class Plugin extends AbstractBtpPlugin {
   }
 }
 
+Plugin.version = 2
 module.exports = Plugin

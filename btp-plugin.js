@@ -1,7 +1,6 @@
 'use strict'
 
 const crypto = require('crypto')
-const debug = require('debug')('ilp-plugin-xrp:btp-plugin')
 const EventEmitter = require('events').EventEmitter
 const BtpPacket = require('btp-packet')
 const IlpPacket = require('ilp-packet')
@@ -75,9 +74,10 @@ const INFO_REQUEST_FULL = 2
  * address of the peer and `btpPacket` is the parsed BTP packet.
  */
 class AbstractBtpPlugin extends EventEmitter {
-  constructor () {
+  constructor (debug) {
     super()
 
+    this._debug = debug
     this._dataHandler = null
     this._moneyHandler = null
   }
@@ -90,14 +90,18 @@ class AbstractBtpPlugin extends EventEmitter {
       this.emit.apply(this, arguments)
     } catch (err) {
       const errInfo = (typeof err === 'object' && err.stack) ? err.stack : String(err)
-      debug('error in handler for event', arguments, errInfo)
+      this._debug('error in handler for event', arguments, errInfo)
     }
+  }
+
+  getInfo () {
+    return {}
   }
 
   async _call (to, btpPacket) {
     const requestId = btpPacket.requestId
 
-    debug('sending ', btpPacket)
+    this._debug('sending ', btpPacket)
 
     let callback
     const response = new Promise((resolve, reject) => {
@@ -136,7 +140,7 @@ class AbstractBtpPlugin extends EventEmitter {
     const {type, requestId, data} = btpPacket
     const typeString = BtpPacket.typeToString(type)
 
-    debug(`received BTP packet (${typeString}, RequestId: ${requestId}): ${JSON.stringify(data)}`)
+    this._debug(`received BTP packet (${typeString}, RequestId: ${requestId}): ${JSON.stringify(data)}`)
 
     try {
       let result
@@ -159,14 +163,14 @@ class AbstractBtpPlugin extends EventEmitter {
           break
       }
 
-      debug(`replying to request ${requestId} with ${JSON.stringify(result)}`)
+      this._debug(`replying to request ${requestId} with ${JSON.stringify(result)}`)
       await this._handleOutgoingBtpPacket(from, {
         type: BtpPacket.TYPE_RESPONSE,
         requestId,
         data: { protocolData: result || [] }
       })
     } catch (e) {
-      debug(`Error processing BTP packet of type ${typeString}: `, e)
+      this._debug(`Error processing BTP packet of type ${typeString}: `, e)
       const error = jsErrorToBtpError(e)
 
       const { code, name, triggeredAt, data } = error
@@ -237,9 +241,11 @@ class AbstractBtpPlugin extends EventEmitter {
         }]
       } else if (protocolMap.custom) {
         // Don't throw -- this message will be emitted.
-      } else if (this._handleBtpMessage) {
-        return this._handleBtpMessage(from, data)
       }
+    }
+
+    if (this._handleBtpMessage) {
+      return this._handleBtpMessage(from, data)
     }
 
     if (!this._dataHandler) {
@@ -273,7 +279,7 @@ class AbstractBtpPlugin extends EventEmitter {
       throw new Error('requestHandler must be a function')
     }
 
-    debug('registering data handler')
+    this._debug('registering data handler')
     this._dataHandler = handler
   }
 
@@ -290,7 +296,7 @@ class AbstractBtpPlugin extends EventEmitter {
       throw new Error('requestHandler must be a function')
     }
 
-    debug('registering money handler')
+    this._debug('registering money handler')
     this._moneyHandler = handler
   }
 

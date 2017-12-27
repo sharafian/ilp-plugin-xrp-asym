@@ -5,7 +5,7 @@ const BtpPacket = require('btp-packet')
 const BigNumber = require('bignumber.js')
 const WebSocket = require('ws')
 const assert = require('assert')
-const debug = require('debug')('ilp-plugin-xrp-stateless')
+const debug = require('debug')('ilp-plugin-xrp-stateless:client')
 const AbstractBtpPlugin = require('./btp-plugin')
 const base64url = require('base64url')
 const nacl = require('tweetnacl')
@@ -15,7 +15,7 @@ const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 
 class Plugin extends AbstractBtpPlugin {
   constructor (opts) {
-    super()
+    super(debug)
     this._currencyScale = 6
     this._server = opts.server
 
@@ -40,6 +40,8 @@ class Plugin extends AbstractBtpPlugin {
 
     // this.on('incoming_reject', this._handleIncomingReject.bind(this))
   }
+
+  sendTransfer () {}
 
   async _createOutgoingChannel () {
     debug('creating outgoing channel')
@@ -370,8 +372,9 @@ class Plugin extends AbstractBtpPlugin {
       }] }
     })
 
+    console.log('RETURNING PROTOCOL ILP FROM', response, response.protocolData.filter(p => p.protocolName === 'ilp')[0].data)
     return response.protocolData
-      .filter(p => p.protocolName === 'ilp')
+      .filter(p => p.protocolName === 'ilp')[0]
       .data
   }
 
@@ -521,4 +524,5 @@ class Plugin extends AbstractBtpPlugin {
   }
 }
 
+Plugin.version = 2
 module.exports = Plugin
