@@ -382,7 +382,6 @@ class Plugin extends AbstractBtpPlugin {
       }] }
     })
 
-    console.log('RETURNING PROTOCOL ILP FROM', response, response.protocolData.filter(p => p.protocolName === 'ilp')[0].data)
     return response.protocolData
       .filter(p => p.protocolName === 'ilp')[0]
       .data
@@ -400,7 +399,6 @@ class Plugin extends AbstractBtpPlugin {
         }] }
       })
 
-      console.log('GOT RESPONSE FROM LAST CLAIM REQUEST', response)
       const primary = response.protocolData[0]
       if (primary.protocolName !== 'last_claim') throw new Error('unable to obtain last claim from connector')
       this._lastClaim = JSON.parse(primary.data.toString())

@@ -359,7 +359,6 @@ class Plugin extends AbstractBtpPlugin {
     const fundChannel = protocols.filter(p => p.protocolName === 'fund_channel')[0]
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
     const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
-    console.log("GOT PROTOCOLS", protocols)
 
     if (getLastClaim) {
       debug('got request for last claim:', this._getLastClaim(account))
@@ -420,20 +419,16 @@ class Plugin extends AbstractBtpPlugin {
 
     // in the case of an ilp message, we behave as a connector
     if (ilp) {
-      console.log("GOT PREPARE")
       if (ilp.data[0] === IlpPacket.Type.TYPE_ILP_PREPARE) {
-        console.log("HANDLE INCOMING PREPARE")
         this._handleIncomingPrepare(account, ilp.data)
       }
 
       // TODO: don't do this, use connector only instead
       if (ilp.data[0] === IlpPacket.Type.TYPE_ILP_PREPARE && IlpPacket.deserializeIlpPrepare(ilp.data).destination === 'peer.config') {
-        console.log("RESPONDING TO ILDCP instead")
         const writer = new Writer()
         const response = this._prefix + account
         writer.writeVarOctetString(Buffer.from(response))
 
-        console.log("ILDCP RESPONSE", writer.getBuffer())
         return [{
           protocolName: 'ilp',
           contentType: BtpPacket.MIME_APPLICATION_OCTET_STRING,
@@ -444,7 +439,6 @@ class Plugin extends AbstractBtpPlugin {
         }]
       }
 
-      console.log("CALLING DATA HANDLER")
       let response = await Promise.race([
         this._dataHandler(ilp.data),
         this._expireData(account, ilp.data)
@@ -460,7 +454,6 @@ class Plugin extends AbstractBtpPlugin {
 
           // DCP passthrough logic
           if (destination === 'peer.config') {
-            console.log("RESPONDING TO OTHER ILDCP AFTER DATA HANDLER")
             const reader = new Reader(data)
             const address = reader.readVarOctetString().toString()
             const newAddress = Buffer.from(address + '.' + account)
@@ -491,7 +484,6 @@ class Plugin extends AbstractBtpPlugin {
       : new Date(Date.now() + DEFAULT_TIMEOUT) // TODO: other timeout as default?
 
     await new Promise((resolve) => setTimeout(resolve, expiresAt - Date.now()))
-    console.log("GIVING EXPIRY")
     return isPrepare
       ? IlpPacket.serializeIlpReject({
           code: 'F00',
@@ -568,7 +560,6 @@ class Plugin extends AbstractBtpPlugin {
     try {
       parsedPacket = IlpPacket.deserializeIlpPrepare(buffer)
     } catch (e) {
-      console.log("REJECTING INVALID PREPARE")
       return IlpPacket.serializeIlpReject({
         code: 'F00',
         message: 'invalid ILP prepare packet: ' + e.message,
@@ -577,10 +568,8 @@ class Plugin extends AbstractBtpPlugin {
       })
     }
 
-    console.log("PARSED PACKET", parsedPacket)
     // DCP; TODO: this shouldn't really be called on a server plugin
     if (parsedPacket.destination === 'peer.config') {
-      console.log("RETURNING ILDCP RESPONSE")
       const writer = new Writer()
       const response = this._prefix.substring(0, this._prefix.length - 1)
       writer.writeVarOctetString(Buffer.from(response))
@@ -608,7 +597,6 @@ class Plugin extends AbstractBtpPlugin {
         .update(parsedResponse.fulfillment)
         .digest()
         .equals(parsedPacket.executionCondition)) {
-          console.log('REJECTING FROM INVALID FULFILLMENT AND CONDITION PAIR')
           return IlpPacket.serializeIlpReject({
             code: 'F00',
             message: 'condition and fulfillment do not match. condition=' +
@@ -620,7 +608,6 @@ class Plugin extends AbstractBtpPlugin {
       }
 
       try {
-        console.log('trying to call with:', parsedPacket)
         await this._call(parsedPacket.destination, {
           type: BtpPacket.TYPE_TRANSFER,
           requestId: await util._requestId(),
@@ -761,11 +748,9 @@ class Plugin extends AbstractBtpPlugin {
     const account = ilpAddressToAccount(this._prefix, from)
 
     // TODO: match the transfer amount
-    console.log('transfer:', btpData)
     const [ jsonClaim ] = btpData.protocolData
       .filter(p => p.protocolName === 'claim')
     const claim = JSON.parse(jsonClaim.data.toString())
-    console.log('claim:', claim)
 
     if (!claim) {
       debug('no claim was supplied on transfer')
@@ -783,8 +768,6 @@ class Plugin extends AbstractBtpPlugin {
     if (to.substring(0, this._prefix.length) !== this._prefix) {
       throw new Error('Invalid destination "' + to + '", must start with prefix: ' + this._prefix)
     }
-
-    console.log('SERVER SENDING OUTGOING PACKET', JSON.stringify(btpPacket))
 
     const account = ilpAddressToAccount(this._prefix, to)
 
