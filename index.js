@@ -347,6 +347,8 @@ class Plugin extends AbstractBtpPlugin {
     if (!protocols.length) return
 
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
+    const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
+
     if (channelProtocol) {
       debug('got notification of changing channel details')  
       const channel = channelProtocol.data
@@ -358,6 +360,14 @@ class Plugin extends AbstractBtpPlugin {
       // than the connection.
       if (channel !== this._clientChannel) return
       this._paychan = await this._api.getPaymentChannel(channel)
+    }
+
+    if (ilp) {
+      return [{
+        protocolName: 'ilp',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: await this._dataHandler(ilp.data)
+      }]
     }
   }
 
@@ -390,8 +400,9 @@ class Plugin extends AbstractBtpPlugin {
         }] }
       })
 
+      console.log('GOT RESPONSE FROM LAST CLAIM REQUEST', response)
       const primary = response.protocolData[0]
-      if (primary.protocolName !== 'claim')
+      if (primary.protocolName !== 'last_claim') throw new Error('unable to obtain last claim from connector')
       this._lastClaim = JSON.parse(primary.data.toString())
     }
 
@@ -413,7 +424,7 @@ class Plugin extends AbstractBtpPlugin {
         )
       } catch (err) {
         // TODO: if these get out of sync, all subsequent transfers of money will fail
-        debug('invalid claim signature for', this._lastClaim.amount)
+        debug('invalid claim signature for', this._lastClaim.amount, err)
         throw new Error('Our last outgoing signature for ' + this._lastClaim.amount + ' is invalid')
       }
     } else {

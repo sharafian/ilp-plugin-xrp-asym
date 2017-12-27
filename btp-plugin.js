@@ -191,8 +191,10 @@ class AbstractBtpPlugin extends EventEmitter {
   }
 
   async _handleData (from, {requestId, data}) {
+    this._debug('handling protocol data', data.protocolData)
     const { ilp, protocolMap } = protocolDataToIlpAndCustom(data)
 
+    this._debug('GOT ILP DATA:', ilp)
     // if there are side protocols only
     if (!ilp) {
       if (protocolMap.info) {
@@ -252,6 +254,7 @@ class AbstractBtpPlugin extends EventEmitter {
       throw new NotAcceptedError('no request handler registered')
     }
 
+    this._debug('CALLING DATA HANDLER')
     const response = await this._dataHandler(ilp)
     return ilpAndCustomToProtocolData({ ilp: response })
   }
@@ -261,8 +264,7 @@ class AbstractBtpPlugin extends EventEmitter {
       throw new Error('no money handler registered')
     }
 
-    response = []
-    if (!this._handleBtpTransfer) {
+    if (this._handleBtpTransfer) {
       return this._handleBtpTransfer(from, data) || []
     }
 
