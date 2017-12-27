@@ -8,6 +8,10 @@ const crypto = require('crypto')
 const IlpPluginXrpServer = require('./server.js')
 const Store = require('./redisStore.js')
 
+process.on('unhandledRejection', (e) => {
+  console.log('UNHANDLED REJECTION', e)
+})
+
 const serverPlugin = new IlpPluginXrpServer({
   prefix: 'test.example.',
   port: 3033,
@@ -35,6 +39,7 @@ async function run (sender, receiver) {
     destinationAccount: await ILP.ILDCP.getAccount(receiver),
     receiverSecret
   })
+  console.log('generated params')
 
   // Note the user of this module must implement the method for
   // communicating sharedSecret and destinationAccount from the recipient
@@ -58,13 +63,14 @@ async function run (sender, receiver) {
   })
 
   console.log('packet', packet)
+  console.log('sending quote')
 
   const quote = await ILP.ILQP.quoteByPacket(sender, packet)
   console.log('got quote:', quote)
 
-  const response = await compat(sender).sendData(IlpPacket.serializeIlpPrepare({
+  const response = await sender.sendData(IlpPacket.serializeIlpPrepare({
     amount: quote.sourceAmount,
-    expiresAt: new Date(quote.expiresAt),
+    expiresAt: new Date(Date.now() + 1000 * quote.sourceExpiryDuration),
     executionCondition: condition,
     destination: destinationAccount,
     data: packet

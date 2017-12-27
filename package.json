@@ -4,7 +4,7 @@
   "description": "Plugin that implements a mini ephemeral ledger",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node test-new-lpi.js",
     "lint": "eslint ."
   },
   "repository": {
@@ -31,6 +31,7 @@
     "bignum": "^0.12.5",
     "btp-packet": "^1.1.0",
     "debug": "^3.1.0",
+    "ilp-packet": "^2.1.0",
     "ilp-plugin-payment-channel-framework": "^1.0.1",
     "ilp-plugin-xrp-paychan-shared": "https://github.com/dappelt/ilp-plugin-xrp-paychan-shared.git",
     "int64": "0.0.5",
