@@ -58,6 +58,8 @@ class Plugin extends AbstractBtpPlugin {
     const signedTx = this._api.sign(tx.txJSON, this._secret)
     const result = await this._api.submit(signedTx.signedTransaction)
 
+    console.log('SIGNED TX:', signedTx, result)
+
     debug('submitted outgoing channel tx to validator')
     if (result.resultCode !== 'tesSUCCESS') {
       const message = 'Error creating the payment channel: ' + result.resultCode + ' ' + result.resultMessage
@@ -71,6 +73,8 @@ class Plugin extends AbstractBtpPlugin {
       const handleTransaction = (ev) => {
         if (ev.transaction.SourceTag !== txTag) return
         if (ev.transaction.Account !== this._address) return
+
+        console.log('MADE CHANNEL:', ev)
 
         debug('transaction complete')
         const channel = util.computeChannelId(
@@ -266,7 +270,8 @@ class Plugin extends AbstractBtpPlugin {
         try {
           btpPacket = BtpPacket.deserialize(binaryMessage)
         } catch (err) {
-          wsIncoming.close()
+          debug('deserialization error:', err)
+          this._ws.close()
         }
         try {
           if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
