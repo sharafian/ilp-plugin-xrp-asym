@@ -1,4 +1,4 @@
-# ILP Plugin XRP Asymmetric
+# ILP Plugin XRP Asym
 > An XRP paychan plugin allowing for a server that takes many connections and a
 > lightweight client
 

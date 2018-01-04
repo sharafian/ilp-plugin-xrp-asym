@@ -1,5 +1,5 @@
 {
-  "name": "ilp-plugin-xrp-asymmetric",
+  "name": "ilp-plugin-xrp-asym",
   "version": "1.1.0",
   "description": "Multi XRP paychan client and server",
   "main": "index.js",
@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/justmoon/ilp-plugin-mini-accounts.git"
+    "url": "git+https://github.com/sharafian/ilp-plugin-xrp-asym.git"
   },
   "keywords": [
     "ilp",
@@ -20,12 +20,11 @@
     "digital",
     "money"
   ],
-  "author": "Stefan Thomas <justmoon@members.fsf.org>",
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/justmoon/ilp-plugin-mini-accounts/issues"
+    "url": "https://github.com/sharafian/ilp-plugin-xrp-asym/issues"
   },
-  "homepage": "https://github.com/justmoon/ilp-plugin-mini-accounts#readme",
+  "homepage": "https://github.com/sharafian/ilp-plugin-xrp-asym#readme",
   "dependencies": {
     "base64url": "^2.0.0",
     "bignum": "^0.12.5",
