@@ -176,12 +176,19 @@ class Plugin extends AbstractBtpPlugin {
         const channelProtocolData = []
         if (!this._channel) {
           this._channel = await this._createOutgoingChannel()
-          // TODO: can we call 'channel' and 'fund_channel' here at the same time?
+
+          const encodedChannel = util.encodeChannelProof(this._channel, this._account)
+          const channelSignature = nacl.sign
+            .detached(encodedChannel, this._keyPair.secretKey)
 
           channelProtocolData.push({
             protocolName: 'channel',
             contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
             data: Buffer.from(this._channel, 'hex')
+          }, {
+            protocolName: 'channel_signature',
+            contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+            data: Buffer.from(channelSignature)
           })
         }
 

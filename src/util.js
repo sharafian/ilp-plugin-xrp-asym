@@ -107,6 +107,14 @@ async function fundChannel ({ api, channel, amount, address, secret }) {
   })
 }
 
+function encodeChannelProof (channel, account) {
+  return Buffer.concat([
+    Buffer.from('channel_signature'),
+    Buffer.from(channel, 'hex'),
+    Buffer.from(account, 'base64')
+  ])
+}
+
 module.exports = {
   INFO_REQUEST_ALL,
   MIN_SETTLE_DELAY, 
@@ -119,5 +127,6 @@ module.exports = {
   randomTag,
   _requestId,
   checkChannelExpiry,
-  fundChannel
+  fundChannel,
+  encodeChannelProof
 }

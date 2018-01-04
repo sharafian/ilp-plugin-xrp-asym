@@ -4,7 +4,7 @@
   "description": "Multi XRP paychan client and server",
   "main": "index.js",
   "scripts": {
-    "test": "node test-new-lpi.js",
+    "test": "node test/test-new-lpi.js",
     "lint": "eslint ."
   },
   "repository": {

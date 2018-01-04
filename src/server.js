@@ -358,6 +358,7 @@ class Plugin extends AbstractBtpPlugin {
     const getLastClaim = protocols.filter(p => p.protocolName === 'last_claim')[0]
     const fundChannel = protocols.filter(p => p.protocolName === 'fund_channel')[0]
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
+    const channelSignatureProtocol = protocols.filter(p => p.protocolName === 'channel_signature')[0]
     const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
 
     if (getLastClaim) {
@@ -375,6 +376,10 @@ class Plugin extends AbstractBtpPlugin {
         .toString('hex')
         .toUpperCase()
 
+      if (!channelSignatureProtocol) {
+        throw new Error(`got channel without signature of channel ownership.`)
+      }
+
       const channelKey = account + ':channel'
       const existingChannel = this._balances.get(channelKey)
 
@@ -387,10 +392,26 @@ class Plugin extends AbstractBtpPlugin {
       // we can use it to refresh the channel details after extra funds are
       // added
       const paychan = await this._api.getPaymentChannel(channel)
+
+      await this._balances.load('channel:' + channel)
+      const accountForChannel = this._balances.get('channel:' + channel)
+      if (accountForChannel && channel !== accountForChannel) {
+        throw new Error(`this channel has already been associated with a
+          different account. account=${account} associated=${accountForChannel}`)
+      }
+
+      const encodedChannelProof = util.encodeChannelProof(channel, account)
+      nacl.sign.detached.verify(
+        encodedChannelProof,
+        channelSignatureProtocol.data,
+        Buffer.from(paychan.publicKey.substring(2), 'hex')
+      )
+
       this._validatePaychanDetails(paychan)
       this._paychans.set(account, paychan)
       this._channelToAccount.set(channel, account)
       this._balances.set(account + ':channel', channel)
+      this._balances.set('channel:' + channel, account)
       debug('registered payment channel for', account)
     }
 
