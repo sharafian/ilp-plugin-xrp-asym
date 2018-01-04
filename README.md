@@ -1,8 +1,9 @@
-# ILP Plugin XRP Stateless
-> An XRP paychan plugin that allows you to be a stateless client
+# ILP Plugin XRP Asymmetric
+> An XRP paychan plugin allowing for a server that takes many connections and a
+> lightweight client
 
 ```js
-const plugin = new IlpPluginXrpStateless({
+const plugin = new IlpPluginXrpClient({
   server: 'btp+wss://:secret@example.com',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs'
 })

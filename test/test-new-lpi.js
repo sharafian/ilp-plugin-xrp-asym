@@ -1,18 +1,17 @@
 'use strict'
 
 const ILP = require('ilp')
-const IlpPluginXrpStateless = require('./index.js')
+const PluginXrp = require('..')
 const IlpPacket = require('ilp-packet')
 const base64url = require('base64url')
 const crypto = require('crypto')
-const IlpPluginXrpServer = require('./server.js')
 const Store = require('./redisStore.js')
 
 process.on('unhandledRejection', (e) => {
   console.log('UNHANDLED REJECTION', e)
 })
 
-const serverPlugin = new IlpPluginXrpServer({
+const serverPlugin = new PluginXrp.Server({
   prefix: 'test.example.',
   port: 3033,
   address: 'r9Ggkrw4VCfRzSqgrkJTeyfZvBvaG9z3hg',
@@ -22,7 +21,7 @@ const serverPlugin = new IlpPluginXrpServer({
   _store: new Store(null, 'test.example.')
 })
 
-const clientPlugin = new IlpPluginXrpStateless({
+const clientPlugin = new PluginXrp({
   server: 'btp+wss://:secret@localhost:3033',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
   bandwidth: 1000000
@@ -106,6 +105,12 @@ connect()
   .then(() => run(clientPlugin, serverPlugin))
   .then(() => run(serverPlugin, clientPlugin))
   //run(serverPlugin, clientPlugin)
+  .then(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5000))
+    await clientPlugin.disconnect()
+    await serverPlugin.disconnect()
+    process.exit(0)
+  })
   .catch(err => {
     console.log((typeof err === 'object' && err.stack)
       ? err.stack
