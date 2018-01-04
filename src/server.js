@@ -53,7 +53,6 @@ class Plugin extends AbstractBtpPlugin {
     this._log = opts._log || console
     this._wss = null
     this._balances = new StoreWrapper(opts._store)
-    this._ephemeral = new Map()
     this._paychans = new Map()
     this._clientPaychans = new Map()
     this._channelToAccount = new Map()
@@ -215,7 +214,6 @@ class Plugin extends AbstractBtpPlugin {
             this._clientPaychans.set(account, paychan)
           }
 
-          this._ephemeral.set(account, this._balances.get(account))
           wsIncoming.send(BtpPacket.serializeResponse(authPacket.requestId, []))
         } catch (err) {
           if (authPacket) {
@@ -546,7 +544,7 @@ class Plugin extends AbstractBtpPlugin {
     const lastClaim = this._getLastClaim(account)
     const lastValue = new BigNumber(lastClaim.amount)
 
-    const prepared = new BigNumber(this._ephemeral.get(account) || '0')
+    const prepared = new BigNumber(this._balances.get(account) || '0')
     const newPrepared = prepared.add(amount)
     const unsecured = newPrepared.sub(lastValue)
     debug(unsecured.toString(), 'unsecured; last claim is',
@@ -563,16 +561,16 @@ class Plugin extends AbstractBtpPlugin {
         ' need: ' + newPrepared.toString())
     }
 
-    this._ephemeral.set(account, newPrepared.toString())
+    this._balances.set(account, newPrepared.toString())
     debug(`account ${account} debited ${amount} units, new balance ${newPrepared.toString()}`)
   }
 
   _rejectIncomingTransfer (account, ilpData) {
     const { amount } = IlpPacket.deserializeIlpPrepare(ilpData)
-    const prepared = new BigNumber(this._ephemeral.get(account))
+    const prepared = new BigNumber(this._balances.get(account))
     const newPrepared = prepared.sub(amount)
 
-    this._ephemeral.set(account, newPrepared)
+    this._balances.set(account, newPrepared)
     debug(`account ${account} roll back ${amount} units, new balance ${newPrepared.toString()}`)
   }
 
