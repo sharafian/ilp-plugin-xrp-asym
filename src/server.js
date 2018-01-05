@@ -9,7 +9,7 @@ const BigNumber = require('bignumber.js')
 const WebSocket = require('ws')
 const assert = require('assert')
 const debug = require('debug')('ilp-plugin-xrp-server')
-const AbstractBtpPlugin = require('./btp-plugin')
+const MiniAccountsPlugin = require('ilp-plugin-mini-accounts')
 const StoreWrapper = require('./store-wrapper')
 const base64url = require('base64url')
 const bignum = require('bignum')
@@ -34,14 +34,9 @@ function ilpAddressToAccount (prefix, ilpAddress) {
   return ilpAddress.substr(prefix.length).split('.')[0]
 }
 
-class Plugin extends AbstractBtpPlugin {
+class Plugin extends MiniAccountsPlugin {
   constructor (opts) {
-    super(debug)
-    this._prefix = opts.prefix
-    this._port = opts.port || 3000
-    this._wsOpts = opts.wsOpts || { port: this._port }
-    this._currencyScale = 6
-    this._modeInfiniteBalances = !!opts.debugInfiniteBalances
+    super(opts)
 
     this._xrpServer = opts.xrpServer
     this._secret = opts.secret
@@ -50,23 +45,12 @@ class Plugin extends AbstractBtpPlugin {
     this._watcher = new ChannelWatcher(10 * 60 * 1000, this._api)
     this._bandwidth = opts.bandwidth || 1000
 
-    this._log = opts._log || console
-    this._wss = null
     this._balances = new StoreWrapper(opts._store)
     this._paychans = new Map()
     this._clientPaychans = new Map()
     this._channelToAccount = new Map()
     this._connections = new Map()
     this._funding = new Map()
-
-    /*
-    this.on('incoming_fulfill', this._handleIncomingFulfill.bind(this))
-    this.on('incoming_reject', this._handleIncomingReject.bind(this))
-    */
-
-    if (this._modeInfiniteBalances) {
-      this._log.warn('(!!!) granting all users infinite balances')
-    }
   }
 
   sendTransfer () {}
@@ -145,146 +129,33 @@ class Plugin extends AbstractBtpPlugin {
     }
   }
 
-  async connect () {
-    if (this._wss) return
-    
-    this._watcher.on('channelClose', this._channelClose)
+  // TODO: also implement cleanup logic
+  async _connect () {
+    const channelKey = account + ':channel'
+    await this._balances.load(channelKey)
+    const existingChannel = this._balances.get(channelKey)
 
-    await this._api.connect()
-    await this._api.connection.request({
-      command: 'subscribe',
-      accounts: [ this._address ]
-    })
+    await this._balances.load(account)
+    await this._balances.load(account + ':claim')
+    await this._balances.load(account + ':block')
+    await this._balances.load(account + ':client_channel')
+    await this._balances.load(account + ':outgoing_balance')
+    const existingClientChannel = this._balances.get(account + ':client_channel')
 
-    debug('listening on port ' + this._port)
-    const wss = this._wss = new WebSocket.Server(this._wsOpts)
-    wss.on('connection', (wsIncoming) => {
-      debug('got connection')
-      let token
-      let channel
-      let account
+    if (existingChannel) {
+      // TODO: DoS vector by requesting paychan on user connect?
+      const paychan = await this._api.getPaymentChannel(existingChannel)
+      this._validatePaychanDetails(paychan)
+      this._paychans.set(account, paychan)
+      this._channelToAccount.set(existingChannel, account)
+    }
 
-      // The first message must be an auth packet
-      // with the macaroon as the auth_token
-      let authPacket
-      wsIncoming.once('message', async (binaryAuthMessage) => {
-        try {
-          authPacket = BtpPacket.deserialize(binaryAuthMessage)
-          assert.equal(authPacket.type, BtpPacket.TYPE_MESSAGE, 'First message sent over BTP connection must be auth packet')
-          assert(authPacket.data.protocolData.length >= 2, 'Auth packet must have auth and auth_token subprotocols')
-          assert.equal(authPacket.data.protocolData[0].protocolName, 'auth', 'First subprotocol must be auth')
-          for (let subProtocol of authPacket.data.protocolData) {
-            if (subProtocol.protocolName === 'auth_token') {
-              // TODO: Do some validation on the token
-              token = subProtocol.data
-              account = tokenToAccount(token)
-
-              let connections = this._connections.get(account)
-              if (!connections) {
-                this._connections.set(account, connections = new Set())
-              }
-
-              connections.add(wsIncoming)
-            }
-          }
-
-          assert(token, 'auth_token subprotocol is required')
-
-          const channelKey = account + ':channel'
-          await this._balances.load(channelKey)
-          const existingChannel = this._balances.get(channelKey)
-
-          await this._balances.load(account)
-          await this._balances.load(account + ':claim')
-          await this._balances.load(account + ':block')
-          await this._balances.load(account + ':client_channel')
-          await this._balances.load(account + ':outgoing_balance')
-          const existingClientChannel = this._balances.get(account + ':client_channel')
-
-          if (existingChannel) {
-            // TODO: DoS vector by requesting paychan on user connect?
-            const paychan = await this._api.getPaymentChannel(existingChannel)
-            this._validatePaychanDetails(paychan)
-            this._paychans.set(account, paychan)
-            this._channelToAccount.set(existingChannel, account)
-          }
-
-          if (existingClientChannel) {
-            const paychan = await this._api.getPaymentChannel(existingClientChannel)
-            this._clientPaychans.set(account, paychan)
-          }
-
-          wsIncoming.send(BtpPacket.serializeResponse(authPacket.requestId, []))
-        } catch (err) {
-          if (authPacket) {
-            const errorResponse = BtpPacket.serializeError({
-              code: 'F00',
-              name: 'NotAcceptedError',
-              data: err.message,
-              triggeredAt: new Date().toISOString()
-            }, authPacket.requestId, [])
-            wsIncoming.send(errorResponse)
-          }
-          wsIncoming.close()
-
-          // clean up paychan info when all connections close
-          // TODO: way to clean up ephemeral balance or balance cache?
-          if (this._connections.get(account).size === 0) {
-            const deleteChannelId = this._paychans.get(account)
-            this._channelToAccount.delete(deleteChannelId)
-            this._paychans.delete(account)
-          }
-
-          return
-        }
-
-        debug('connection authenticated')
-
-        wsIncoming.on('message', (binaryMessage) => {
-          let btpPacket
-          try {
-            btpPacket = BtpPacket.deserialize(binaryMessage)
-          } catch (err) {
-            wsIncoming.close()
-          }
-          debug(`account ${account}: processing btp packet ${JSON.stringify(btpPacket)}`)
-          try {
-            let operation = Promise.resolve()
-            if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
-              operation = this._handleIncomingBtpPrepare(account, btpPacket)
-            }
-            debug('packet is authorized, forwarding to host')
-            operation.then(() => {
-              this._handleIncomingBtpPacket(this._prefix + account, btpPacket)
-            })
-          } catch (err) {
-            debug('btp packet not accepted', err)
-            const errorResponse = BtpPacket.serializeError({
-              code: 'F00',
-              name: 'NotAcceptedError',
-              triggeredAt: new Date().toISOString(),
-              data: err.message
-            }, btpPacket.requestId, [])
-            wsIncoming.send(errorResponse)
-          }
-        })
-      })
-    })
+    if (existingClientChannel) {
+      const paychan = await this._api.getPaymentChannel(existingClientChannel)
+      this._clientPaychans.set(account, paychan)
+    }
 
     return null
-  }
-
-  async disconnect () {
-    if (this._wss) {
-      return new Promise(resolve => {
-        this._wss.close(resolve)
-        this._wss = null
-      })
-    }
-  }
-
-  isConnected () {
-    return !!this._wss
   }
 
   async _fundOutgoingChannel (account, primary) {
@@ -348,9 +219,9 @@ class Plugin extends AbstractBtpPlugin {
     })
   }
 
-  async _handleBtpMessage (from, message) {
+  async _handleCustomData (from, message) {
     const account = ilpAddressToAccount(this._prefix, from)
-    const protocols = message.protocolData
+    const protocols = message.data.protocolData
     if (!protocols.length) return
 
     const getLastClaim = protocols.filter(p => p.protocolName === 'last_claim')[0]
@@ -470,23 +341,6 @@ class Plugin extends AbstractBtpPlugin {
           // TODO: should await, or no?
           const { amount, destination, data } = IlpPacket.deserializeIlpPrepare(ilp.data)
           if (amount !== '0' && this._moneyHandler) this._moneyHandler(amount)
-
-          // DCP passthrough logic
-          if (destination === 'peer.config') {
-            const reader = new Reader(data)
-            const address = reader.readVarOctetString().toString()
-            const newAddress = Buffer.from(address + '.' + account)
-
-            const writer = new Writer()
-            writer.writeVarOctetString(newAddress)
-
-            const extra = reader.read(reader.buffer.length - reader.cursor)
-            writer.write(extra)
-
-            response = IlpPacket.serializeIlpFulfill(Object.assign(
-              IlpPacket.deserializeIlpFulfill(response),
-              { data: writer.getBuffer() }))
-          }
         }
       }
 
@@ -574,78 +428,39 @@ class Plugin extends AbstractBtpPlugin {
     debug(`account ${account} roll back ${amount} units, new balance ${newPrepared.toString()}`)
   }
 
-  async sendData (buffer) {
-    let parsedPacket
-    try {
-      parsedPacket = IlpPacket.deserializeIlpPrepare(buffer)
-    } catch (e) {
-      return IlpPacket.serializeIlpReject({
-        code: 'F00',
-        message: 'invalid ILP prepare packet: ' + e.message,
-        triggeredBy: this._prefix, // TODO: is that right?
-        data: Buffer.from([])
-      })
-    }
+  _sendPrepare (destination, parsedPacket) {
+    // TODO: do we need anything here?
+  }
 
-    // DCP; TODO: this shouldn't really be called on a server plugin
-    if (parsedPacket.destination === 'peer.config') {
-      const writer = new Writer()
-      const response = this._prefix.substring(0, this._prefix.length - 1)
-      writer.writeVarOctetString(Buffer.from(response))
-
-      return IlpPacket.serializeIlpFulfill({
-        fulfillment: Buffer.alloc(32),
-        data: writer.getBuffer()
-      })
-    }
-
-    const response = await this._call(parsedPacket.destination, {
-      type: BtpPacket.TYPE_MESSAGE,
-      requestId: await util._requestId(),
-      data: { protocolData: [{
-        protocolName: 'ilp',
-        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-        data: buffer
-      }] }
-    })
-
-    const ilpResponse = response.protocolData.filter(p => p.protocolName === 'ilp')[0].data
-    if (ilpResponse[0] === IlpPacket.Type.TYPE_ILP_FULFILL) {
-      const parsedResponse = IlpPacket.deserializeIlpFulfill(ilpResponse)
+  _handlePrepareResponse (destination, parsedResponse, preparePacket) {
+    if (parsedResponse.type === IlpPacket.Type.TYPE_ILP_FULFILL) {
       if (!crypto.createHash('sha256')
-        .update(parsedResponse.fulfillment)
+        .update(parsedResponse.data.fulfillment)
         .digest()
-        .equals(parsedPacket.executionCondition)) {
-          return IlpPacket.serializeIlpReject({
-            code: 'F00',
-            message: 'condition and fulfillment do not match. condition=' +
-              parsedPacket.executionCondition.toString('base64') + '. fulfillment=' +
-              parsedResponse.fulfillment.toString('base64') + '.',
-            triggeredBy: this._prefix, // TODO: is that right?
-            data: Buffer.from([])
-          })
+        .equals(preparePacket.data.executionCondition)) {
+          // TODO: could this leak data if the fulfillment is wrong in
+          // a predictable way?
+          throw new Error(`condition and fulfillment don\'t match.
+            condition=${preparePacket.data.executionCondition}
+            fulfillment=${parsedResponse.data.fulfillment}`)
       }
 
-      try {
-        await this._call(parsedPacket.destination, {
-          type: BtpPacket.TYPE_TRANSFER,
-          requestId: await util._requestId(),
-          data: {
-            amount: parsedPacket.amount,
-            protocolData: this._sendMoneyToAccount(
-              parsedPacket.amount,
-              parsedPacket.destination)
-          }
+      this._call(parsedPacket.destination, {
+        type: BtpPacket.TYPE_TRANSFER,
+        requestId: await util._requestId(),
+        data: {
+          amount: parsedPacket.amount,
+          protocolData: this._sendMoneyToAccount(
+            parsedPacket.amount,
+            parsedPacket.destination)
+        }
+      })
+        .catch((e) => {
+          debug(`failed to pay account.
+            destination=${parsedPacket.destination}
+            error=${e.message}`)
         })
-      } catch (e) {
-        debug(`failed to pay account ${parsedPacket.destination}:
-          ${e.message}`)
-      }
     }
-
-    return response.protocolData
-      .filter(p => p.protocolName === 'ilp')[0]
-      .data
   }
 
   async sendMoney () {
@@ -763,7 +578,7 @@ class Plugin extends AbstractBtpPlugin {
     debug('set new claim for amount', amount)
   }
 
-  _handleBtpTransfer (from, btpData) {
+  _handleMoney (from, btpData) {
     const account = ilpAddressToAccount(this._prefix, from)
 
     // TODO: match the transfer amount
@@ -781,32 +596,6 @@ class Plugin extends AbstractBtpPlugin {
 
   _getLastClaim (account) {
     return JSON.parse(this._balances.get(account + ':claim') || '{"amount":"0"}')
-  }
-
-  async _handleOutgoingBtpPacket (to, btpPacket) {
-    if (to.substring(0, this._prefix.length) !== this._prefix) {
-      throw new Error('Invalid destination "' + to + '", must start with prefix: ' + this._prefix)
-    }
-
-    const account = ilpAddressToAccount(this._prefix, to)
-    const connections = this._connections.get(account)
-
-    if (!connections) {
-      throw new Error('No clients connected for account ' + account)
-    }
-
-    const results = Array.from(connections).map(wsIncoming => {
-      const result = new Promise(resolve => wsIncoming.send(BtpPacket.serialize(btpPacket), resolve))
-
-      result.catch(err => {
-        const errorInfo = (typeof err === 'object' && err.stack) ? err.stack : String(err)
-        debug('unable to send btp message to client: ' + errorInfo, 'btp packet:', JSON.stringify(btpPacket))
-      })
-    })
-
-    await Promise.all(results)
-
-    return null
   }
 }
 
