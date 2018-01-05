@@ -6,14 +6,14 @@ const BigNumber = require('bignumber.js')
 const WebSocket = require('ws')
 const assert = require('assert')
 const debug = require('debug')('ilp-plugin-xrp-stateless')
-const AbstractBtpPlugin = require('./btp-plugin')
+const BtpPlugin = require('./ilp-plugin-btp')
 const base64url = require('base64url')
 const nacl = require('tweetnacl')
 const util = require('./util')
 const OUTGOING_CHANNEL_DEFAULT_AMOUNT_XRP = '10' // TODO: something lower?
 const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 
-class Plugin extends AbstractBtpPlugin {
+class Plugin extends BtpPlugin {
   constructor (opts) {
     super(debug)
     this._currencyScale = 6
@@ -91,275 +91,193 @@ class Plugin extends AbstractBtpPlugin {
     })
   }
 
-  async connect () {
-    if (this._ws) return
-
-    const parsedServer = new URL(this._server)
-    const host = parsedServer.host // TODO: include path
-    const secret = parsedServer.password
-    const ws = this._ws = new WebSocket('ws://' + host) // TODO: wss
-    const protocolData = [{
-      protocolName: 'auth',
-      contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-      data: Buffer.from([])
-    }, {
-      protocolName: 'auth_username',
-      contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
-      data: Buffer.from('', 'utf8')
-    }, {
-      protocolName: 'auth_token',
-      contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
-      data: Buffer.from(secret, 'utf8')
-    }]
-
-    return new Promise((resolve, reject) => {
-      this._ws.on('open', async () => {
-        debug('connected to server')
-
-        await this._call(null, {
-          type: BtpPacket.TYPE_MESSAGE,
-          requestId: await util._requestId(),
-          data: { protocolData }
-        })
-
-        const infoResponse = await this._call(null, {
-          type: BtpPacket.TYPE_MESSAGE,
-          requestId: await util._requestId(),
-          data: { protocolData: [{
-            protocolName: 'info',
-            contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-            data: Buffer.from([ util.INFO_REQUEST_ALL ])
-          }] }
-        })
-
-        // TODO: do the processes of channel establishment and client-channel
-        // establishment occur in here automatically (in the case that no channel
-        // exists) or do they happen in a separate script?
-
-        const info = JSON.parse(infoResponse.protocolData[0].data.toString())
-        debug('got info:', info)
-
-        this._account = info.account
-        this._prefix = info.prefix
-        this._channel = info.channel
-        this._clientChannel = info.clientChannel
-        this._peerAddress = info.address
-        this._keyPair = nacl.sign.keyPair
-          .fromSeed(util.hmac(
-            this._secret,
-            'ilp-plugin-xrp-stateless' + this._peerAddress
-          ))
-
-        if (!this._xrpServer) {
-          this._xrpServer = this._account.startsWith('test.')
-            ? 'wss://s.altnet.rippletest.net:51233'
-            : 's1.ripple.com'
-        }
-
-        this._api = new RippleAPI({ server: this._xrpServer })
-        await this._api.connect()
-        await this._api.connection.request({
-          command: 'subscribe',
-          accounts: [ this._address ]
-        })
-
-        this._watcher = new ChannelWatcher(60 * 1000, this._api)
-        this._watcher.on('channelClose', () => {
-          debug('channel closing; triggering auto-disconnect')
-          // TODO: should we also close our own channel?
-          this._disconnect()
-        })
-
-        // TODO: is this an attack vector, if not telling the plugin about their channel
-        // causes them to open another channel?
-
-        const channelProtocolData = []
-        if (!this._channel) {
-          this._channel = await this._createOutgoingChannel()
-
-          const encodedChannel = util.encodeChannelProof(this._channel, this._account)
-          const channelSignature = nacl.sign
-            .detached(encodedChannel, this._keyPair.secretKey)
-
-          channelProtocolData.push({
-            protocolName: 'channel',
-            contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-            data: Buffer.from(this._channel, 'hex')
-          }, {
-            protocolName: 'channel_signature',
-            contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-            data: Buffer.from(channelSignature)
-          })
-        }
-
-        // used to make sure we don't go over the limit
-        this._channelDetails = await this._api.getPaymentChannel(this._channel)
-
-        if (!this._clientChannel) {
-          debug('no client channel has been established; requesting')
-          channelProtocolData.push({
-            protocolName: 'fund_channel',
-            contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
-            data: Buffer.from(this._address)
-          })
-        }
-
-        if (channelProtocolData.length) {
-          const channelResponse = await this._call(null, {
-            type: BtpPacket.TYPE_MESSAGE,
-            requestId: await util._requestId(),
-            data: { protocolData: channelProtocolData }
-          })
-
-          if (!this._clientChannel) {
-            const fundChannelResponse = channelResponse
-              .protocolData
-              .filter(p => p.protocolName === 'fund_channel')[0]
-
-            this._clientChannel = fundChannelResponse.data
-              .toString('hex')
-              .toUpperCase()
-          }
-        }
-
-        // TODO: should this occur as part of info or should the connector send us a
-        // separate message to inform us that they have a channel to us?
-        if (this._clientChannel) {
-          this._paychan = await this._api.getPaymentChannel(this._clientChannel)
-
-          // don't accept any channel that isn't for us
-          if (this._paychan.destination !== this._address) {
-            await this._disconnect()
-            return reject(new Error('Fatal: Payment channel destination is not ours; Our connector is likely malicious'))
-          }
-
-          // don't accept any channel that can be closed too fast
-          if (this._paychan.settleDelay < util.MIN_SETTLE_DELAY) {
-            await this._disconnect()
-            return reject(new Error('Fatal: Payment channel settle delay is too short; Our connector is likely malicious'))
-          }
-
-          // don't accept any channel that is closing
-          if (this._paychan.expiration) {
-            await this._disconnect()
-            return reject(new Error('Fatal: Payment channel is already closing; Our connector is likely malicious'))
-          }
-
-          // don't accept any channel with a static cancel time
-          if (this._paychan.cancelAfter) {
-            await this._disconnect()
-            return reject(new Error('Fatal: Payment channel has a hard cancel; Our connector is likely malicious'))
-          }
-
-          this._bestClaim = {
-            amount: util.xrpToDrops(this._paychan.balance)
-          }
-
-          // load the best claim from the crash cache
-          if (this._store) {
-            const bestClaim = JSON.parse(await this._store.get(this._clientChannel))
-            if (bestClaim.amount > this._bestClaim) {
-              this._bestClaim = bestClaim
-              // TODO: should it submit the recovered claim right away or wait?
-            }
-          }
-
-          debug('loaded best claim of', this._bestClaim)
-          this._watcher.watch(this._clientChannel)
-        }
-
-        // finished the connect process
-        resolve()
-      })
-
-      this._ws.on('message', (binaryMessage) => {
-        let btpPacket
-        try {
-          btpPacket = BtpPacket.deserialize(binaryMessage)
-        } catch (err) {
-          debug('deserialization error:', err)
-          this._ws.close()
-        }
-        try {
-          if (btpPacket.type === BtpPacket.TYPE_PREPARE) {
-            this._handleIncomingBtpPrepare(btpPacket)
-          }
-          debug('packet is authorized, forwarding to host')
-          this._handleIncomingBtpPacket(this._prefix, btpPacket)
-        } catch (err) {
-          debug('btp packet not accepted', err)
-          const errorResponse = BtpPacket.serializeError({
-            code: 'F00',
-            name: 'NotAcceptedError',
-            triggeredAt: new Date().toISOString(),
-            data: err.message
-          }, btpPacket.requestId, [])
-          wsIncoming.send(errorResponse)
-        }
-      })
+  async _connect () {
+    const infoResponse = await this._call(null, {
+      type: BtpPacket.TYPE_MESSAGE,
+      requestId: await util._requestId(),
+      data: { protocolData: [{
+        protocolName: 'info',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: Buffer.from([ util.INFO_REQUEST_ALL ])
+      }] }
     })
-  }
 
-  async disconnect () {
-    if (this._ws) {
-      // complete any funding txes before we disconnect
-      if (this._funding) {
-        await this._funding
-      }
+    // TODO: do the processes of channel establishment and client-channel
+    // establishment occur in here automatically (in the case that no channel
+    // exists) or do they happen in a separate script?
 
-      // bind error to no-op so that it doesn't crash before we
-      // submit our claim
-      this._ws.on('error', e => {
-        debug('ws error:', e.message)
-      })
+    const info = JSON.parse(infoResponse.protocolData[0].data.toString())
+    debug('got info:', info)
 
-      await Promise.race([
-        new Promise(resolve => {
-          this._ws.close(1000, 'disconnect', resolve)
-          this._ws = null
-        }),
-        new Promise(resolve => setTimeout(resolve, 10))
-      ])
+    this._account = info.account
+    this._prefix = info.prefix
+    this._channel = info.channel
+    this._clientChannel = info.clientChannel
+    this._peerAddress = info.address
+    this._keyPair = nacl.sign.keyPair
+      .fromSeed(util.hmac(
+        this._secret,
+        'ilp-plugin-xrp-stateless' + this._peerAddress
+      ))
 
-      if (this._store) {
-        await this._writeQueue
-      }
-
-      if (this._bestClaim.amount === '0') return
-      if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
-
-      debug('creating claim tx')
-      const claimTx = await this._api.preparePaymentChannelClaim(this._address, {
-        balance: util.dropsToXrp(this._bestClaim.amount),
-        channel: this._clientChannel,
-        signature: this._bestClaim.signature.toUpperCase(),
-        publicKey: this._paychan.publicKey
-      })
-
-      debug('signing claim transaction')
-      const signedTx = this._api.sign(claimTx.txJSON, this._secret)
-
-      debug('submitting claim transaction ', claimTx)
-      const {resultCode, resultMessage} = await this._api.submit(signedTx.signedTransaction)
-      if (resultCode !== 'tesSUCCESS') {
-        console.error('WARNING: Error submitting claim: ', resultMessage)
-        throw new Error('Could not claim funds: ', resultMessage)
-      }
-
-      debug('done')
+    if (!this._xrpServer) {
+      this._xrpServer = this._account.startsWith('test.')
+        ? 'wss://s.altnet.rippletest.net:51233'
+        : 's1.ripple.com'
     }
+
+    this._api = new RippleAPI({ server: this._xrpServer })
+    await this._api.connect()
+    await this._api.connection.request({
+      command: 'subscribe',
+      accounts: [ this._address ]
+    })
+
+    this._watcher = new ChannelWatcher(60 * 1000, this._api)
+    this._watcher.on('channelClose', () => {
+      debug('channel closing; triggering auto-disconnect')
+      // TODO: should we also close our own channel?
+      this._disconnect()
+    })
+
+    // TODO: is this an attack vector, if not telling the plugin about their channel
+    // causes them to open another channel?
+
+    const channelProtocolData = []
+    if (!this._channel) {
+      this._channel = await this._createOutgoingChannel()
+
+      const encodedChannel = util.encodeChannelProof(this._channel, this._account)
+      const channelSignature = nacl.sign
+        .detached(encodedChannel, this._keyPair.secretKey)
+
+      channelProtocolData.push({
+        protocolName: 'channel',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: Buffer.from(this._channel, 'hex')
+      }, {
+        protocolName: 'channel_signature',
+        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+        data: Buffer.from(channelSignature)
+      })
+    }
+
+    // used to make sure we don't go over the limit
+    this._channelDetails = await this._api.getPaymentChannel(this._channel)
+
+    if (!this._clientChannel) {
+      debug('no client channel has been established; requesting')
+      channelProtocolData.push({
+        protocolName: 'fund_channel',
+        contentType: BtpPacket.MIME_TEXT_PLAIN_UTF8,
+        data: Buffer.from(this._address)
+      })
+    }
+
+    if (channelProtocolData.length) {
+      const channelResponse = await this._call(null, {
+        type: BtpPacket.TYPE_MESSAGE,
+        requestId: await util._requestId(),
+        data: { protocolData: channelProtocolData }
+      })
+
+      if (!this._clientChannel) {
+        const fundChannelResponse = channelResponse
+          .protocolData
+          .filter(p => p.protocolName === 'fund_channel')[0]
+
+        this._clientChannel = fundChannelResponse.data
+          .toString('hex')
+          .toUpperCase()
+      }
+    }
+
+    // TODO: should this occur as part of info or should the connector send us a
+    // separate message to inform us that they have a channel to us?
+    if (this._clientChannel) {
+      this._paychan = await this._api.getPaymentChannel(this._clientChannel)
+
+      // don't accept any channel that isn't for us
+      if (this._paychan.destination !== this._address) {
+        await this._disconnect()
+        return reject(new Error('Fatal: Payment channel destination is not ours; Our connector is likely malicious'))
+      }
+
+      // don't accept any channel that can be closed too fast
+      if (this._paychan.settleDelay < util.MIN_SETTLE_DELAY) {
+        await this._disconnect()
+        return reject(new Error('Fatal: Payment channel settle delay is too short; Our connector is likely malicious'))
+      }
+
+      // don't accept any channel that is closing
+      if (this._paychan.expiration) {
+        await this._disconnect()
+        return reject(new Error('Fatal: Payment channel is already closing; Our connector is likely malicious'))
+      }
+
+      // don't accept any channel with a static cancel time
+      if (this._paychan.cancelAfter) {
+        await this._disconnect()
+        return reject(new Error('Fatal: Payment channel has a hard cancel; Our connector is likely malicious'))
+      }
+
+      this._bestClaim = {
+        amount: util.xrpToDrops(this._paychan.balance)
+      }
+
+      // load the best claim from the crash cache
+      if (this._store) {
+        const bestClaim = JSON.parse(await this._store.get(this._clientChannel))
+        if (bestClaim.amount > this._bestClaim) {
+          this._bestClaim = bestClaim
+          // TODO: should it submit the recovered claim right away or wait?
+        }
+      }
+
+      debug('loaded best claim of', this._bestClaim)
+      this._watcher.watch(this._clientChannel)
+    }
+
+    // finished the connect process
+    debug('connected asym client plugin')
   }
 
-  isConnected () {
-    return !!this._ws
+  async _disconnect () {
+    if (this._funding) {
+      await this._funding
+    }
+
+    if (this._store) {
+      await this._writeQueue
+    }
+
+    if (this._bestClaim.amount === '0') return
+    if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
+
+    debug('creating claim tx')
+    const claimTx = await this._api.preparePaymentChannelClaim(this._address, {
+      balance: util.dropsToXrp(this._bestClaim.amount),
+      channel: this._clientChannel,
+      signature: this._bestClaim.signature.toUpperCase(),
+      publicKey: this._paychan.publicKey
+    })
+
+    debug('signing claim transaction')
+    const signedTx = this._api.sign(claimTx.txJSON, this._secret)
+
+    debug('submitting claim transaction ', claimTx)
+    const {resultCode, resultMessage} = await this._api.submit(signedTx.signedTransaction)
+    if (resultCode !== 'tesSUCCESS') {
+      console.error('WARNING: Error submitting claim: ', resultMessage)
+      throw new Error('Could not claim funds: ', resultMessage)
+    }
+
+    debug('done')
   }
 
-  async _handleBtpMessage (from, message) {
-    const protocols = message.protocolData
-    if (!protocols.length) return
-
-    const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
-    const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
+  async _handleData (from, message) {
+    const { ilp, protocolMap } = this.protocolDataToIlpAndCustom(data)
+    const channelProtocol = protocolMap.channel
 
     if (channelProtocol) {
       debug('got notification of changing channel details')  
@@ -374,29 +292,12 @@ class Plugin extends AbstractBtpPlugin {
       this._paychan = await this._api.getPaymentChannel(channel)
     }
 
-    if (ilp) {
-      return [{
-        protocolName: 'ilp',
-        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-        data: await this._dataHandler(ilp.data)
-      }]
+    if (!this._dataHandler) {
+      throw new Error('no request handler registered')
     }
-  }
 
-  async sendData (buffer) {
-    const response = await this._call(null, {
-      type: BtpPacket.TYPE_MESSAGE,
-      requestId: await util._requestId(),
-      data: { protocolData: [{
-        protocolName: 'ilp',
-        contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
-        data: buffer
-      }] }
-    })
-
-    return response.protocolData
-      .filter(p => p.protocolName === 'ilp')[0]
-      .data
+    const response = await this._dataHandler(ilp)
+    return ilpAndCustomToProtocolData({ ilp: response })
   }
 
   async sendMoney (transferAmount) {
@@ -499,9 +400,9 @@ class Plugin extends AbstractBtpPlugin {
     })
   }
 
-  _handleBtpTransfer (from, btpData) {
-    const transferAmount = btpData.amount
-    const primary = btpData.protocolData[0]
+  _handleMoney (from, { requestId, data }) {
+    const transferAmount = data.amount
+    const primary = data.protocolData[0]
 
     if (primary.protocolName === 'claim') {
       const nextAmount = new BigNumber(this._bestClaim.amount).add(transferAmount)
@@ -533,14 +434,6 @@ class Plugin extends AbstractBtpPlugin {
           return this._store.put(this._clientChannel, JSON.stringify(this._bestClaim))
         })
       }
-    }
-  }
-
-  async _handleOutgoingBtpPacket (to, btpPacket) {
-    try { 
-      await new Promise(resolve => this._ws.send(BtpPacket.serialize(btpPacket), resolve))
-    } catch (e) {
-      debug('unable to send btp message to client: ' + e.message, 'btp packet:', JSON.stringify(btpPacket))
     }
   }
 }
