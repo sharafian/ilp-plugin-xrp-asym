@@ -6,7 +6,7 @@ const BigNumber = require('bignumber.js')
 const WebSocket = require('ws')
 const assert = require('assert')
 const debug = require('debug')('ilp-plugin-xrp-stateless')
-const BtpPlugin = require('./ilp-plugin-btp')
+const BtpPlugin = require('ilp-plugin-btp')
 const base64url = require('base64url')
 const nacl = require('tweetnacl')
 const util = require('./util')
@@ -15,7 +15,7 @@ const { ChannelWatcher } = require('ilp-plugin-xrp-paychan-shared')
 
 class Plugin extends BtpPlugin {
   constructor (opts) {
-    super(debug)
+    super(opts)
     this._currencyScale = 6
     this._server = opts.server
 
@@ -276,12 +276,12 @@ class Plugin extends BtpPlugin {
   }
 
   async _handleData (from, message) {
-    const { ilp, protocolMap } = this.protocolDataToIlpAndCustom(data)
+    const { ilp, protocolMap } = this.protocolDataToIlpAndCustom(message.data)
     const channelProtocol = protocolMap.channel
 
     if (channelProtocol) {
       debug('got notification of changing channel details')  
-      const channel = channelProtocol.data
+      const channel = channelProtocol
         .toString('hex')
         .toUpperCase()
 
@@ -290,6 +290,7 @@ class Plugin extends BtpPlugin {
       // than the connection.
       if (channel !== this._clientChannel) return
       this._paychan = await this._api.getPaymentChannel(channel)
+      return []
     }
 
     if (!this._dataHandler) {
@@ -297,7 +298,7 @@ class Plugin extends BtpPlugin {
     }
 
     const response = await this._dataHandler(ilp)
-    return ilpAndCustomToProtocolData({ ilp: response })
+    return this.ilpAndCustomToProtocolData({ ilp: response })
   }
 
   async sendMoney (transferAmount) {

@@ -1,6 +1,7 @@
 'use strict'
 
 const ILP = require('ilp')
+const ILDCP = require('ilp-protocol-ildcp')
 const PluginXrp = require('..')
 const IlpPacket = require('ilp-packet')
 const base64url = require('base64url')
@@ -18,7 +19,12 @@ const serverPlugin = new PluginXrp.Server({
   secret: 'snRHsS3wLzbfeDNSVmtLKjE6sPMws',
   xrpServer: 'wss://s.altnet.rippletest.net:51233',
   bandwidth: 1000000,
-  _store: new Store(null, 'test.example.')
+  _store: new Store(null, 'test.example.'),
+  debugHostIldcpInfo: {
+    clientAddress: 'test.example',
+    assetScale: 6,
+    assetCode: 'XRP' 
+  }
 })
 
 const clientPlugin = new PluginXrp({
@@ -43,11 +49,15 @@ async function run (sender, receiver) {
   sender.registerMoneyHandler(() => {})
   receiver.registerMoneyHandler(() => {})
 
+  console.log('deregistered handlers')
   console.log('receiver connected')
 
   const receiverSecret = Buffer.from('secret_seed')
+  const receiverInfo = await ILDCP.fetch(receiver.sendData.bind(receiver))
+  console.log('looked up receiver info', receiverInfo)
+
   const { sharedSecret, destinationAccount } = ILP.PSK.generateParams({
-    destinationAccount: await ILP.ILDCP.getAccount(receiver),
+    destinationAccount: receiverInfo.clientAddress,
     receiverSecret
   })
   console.log('generated params')
@@ -60,10 +70,11 @@ async function run (sender, receiver) {
     console.log('got transfer:', params.transfer)
 
     console.log('fulfilling.')
-    stopListening()
+    stopListening.close()
     return params.fulfill()
     // throw new Error('I don\'t like it')
   })
+  console.log('registered handlers')
 
   // the sender can generate these, via the sharedSecret and destinationAccount
   // given to them by the receiver.
