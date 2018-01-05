@@ -129,8 +129,17 @@ class Plugin extends MiniAccountsPlugin {
     }
   }
 
+  async _preConnect () {
+    await this._api.connect()
+    await this._api.connection.request({
+      command: 'subscribe',
+      accounts: [ this._address ]
+    })
+  }
+
   // TODO: also implement cleanup logic
-  async _connect () {
+  async _connect (address, { requestId, data }) {
+    const account = this.ilpAddressToAccount(address)
     const channelKey = account + ':channel'
     await this._balances.load(channelKey)
     const existingChannel = this._balances.get(channelKey)
@@ -164,6 +173,7 @@ class Plugin extends MiniAccountsPlugin {
 
     const existing = this._balances.get(account + ':client_channel')
     if (existing) {
+      debug('outgoing channel already exists')
       const paychan = await this._api.getPaymentChannel(existing)
       this._clientChannels.set(account, paychan)
       return existing
@@ -174,6 +184,7 @@ class Plugin extends MiniAccountsPlugin {
     const outgoingAccount = primary.data.toString() 
     // TODO: validate the account
 
+    debug('creating outgoing channel fund transaction')
     const keyPairSeed = util.hmac(this._secret, CHANNEL_KEYS + account)
     const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
     const txTag = util.randomTag()
@@ -185,6 +196,7 @@ class Plugin extends MiniAccountsPlugin {
       sourceTag: txTag
     })
 
+    debug('submitting transaction')
     const signedTx = this._api.sign(tx.txJSON, this._secret)
     const result = await this._api.submit(signedTx.signedTransaction)
 
@@ -204,6 +216,7 @@ class Plugin extends MiniAccountsPlugin {
           ev.transaction.Destination,
           ev.transaction.Sequence)
 
+        debug('created outgoing channel. channel=', clientChannelId)
         this._balances.set(account + ':outgoing_balance', '0')
         this._balances.set(account + ':client_channel', clientChannelId)
 
@@ -229,6 +242,7 @@ class Plugin extends MiniAccountsPlugin {
     const channelProtocol = protocols.filter(p => p.protocolName === 'channel')[0]
     const channelSignatureProtocol = protocols.filter(p => p.protocolName === 'channel_signature')[0]
     const ilp = protocols.filter(p => p.protocolName === 'ilp')[0]
+    const info = protocols.filter(p => p.protocolName === 'info')[0]
 
     if (getLastClaim) {
       debug('got request for last claim:', this._getLastClaim(account))
@@ -236,6 +250,15 @@ class Plugin extends MiniAccountsPlugin {
         protocolName: 'last_claim',
         contentType: BtpPacket.MIME_APPLICATION_JSON,
         data: Buffer.from(JSON.stringify(this._getLastClaim(account)))
+      }]
+    }
+
+    if (info) {
+      debug('got info request')
+      return [{
+        protocolName: 'info',
+        contentType: BtpPacket.MIME_APPLICATION_JSON,
+        data: Buffer.from(JSON.stringify(this._extraInfo(from)))
       }]
     }
 
@@ -433,6 +456,7 @@ class Plugin extends MiniAccountsPlugin {
   }
 
   _handlePrepareResponse (destination, parsedResponse, preparePacket) {
+    debug('got prepare response', parsedResponse)
     if (parsedResponse.type === IlpPacket.Type.TYPE_ILP_FULFILL) {
       if (!crypto.createHash('sha256')
         .update(parsedResponse.data.fulfillment)
@@ -445,19 +469,23 @@ class Plugin extends MiniAccountsPlugin {
             fulfillment=${parsedResponse.data.fulfillment}`)
       }
 
-      this._call(parsedPacket.destination, {
-        type: BtpPacket.TYPE_TRANSFER,
-        requestId: await util._requestId(),
-        data: {
-          amount: parsedPacket.amount,
-          protocolData: this._sendMoneyToAccount(
-            parsedPacket.amount,
-            parsedPacket.destination)
-        }
-      })
+      // send off a transfer in the background to settle
+      util._requestId()
+        .then((requestId) => {
+          return this._call(destination, {
+            type: BtpPacket.TYPE_TRANSFER,
+            requestId,
+            data: {
+              amount: preparePacket.data.amount,
+              protocolData: this._sendMoneyToAccount(
+                preparePacket.data.amount,
+                destination)
+            }
+          })
+        })
         .catch((e) => {
           debug(`failed to pay account.
-            destination=${parsedPacket.destination}
+            destination=${data}
             error=${e.message}`)
         })
     }
@@ -582,7 +610,7 @@ class Plugin extends MiniAccountsPlugin {
     const account = ilpAddressToAccount(this._prefix, from)
 
     // TODO: match the transfer amount
-    const [ jsonClaim ] = btpData.protocolData
+    const [ jsonClaim ] = btpData.data.protocolData
       .filter(p => p.protocolName === 'claim')
     const claim = JSON.parse(jsonClaim.data.toString())
 
