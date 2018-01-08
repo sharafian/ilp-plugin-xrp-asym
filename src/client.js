@@ -30,6 +30,7 @@ class Plugin extends BtpPlugin {
 
     // make sure two funds don't happen at once
     this._funding = false
+    this._claimInterval = opts.claimInterval || util.DEFAULT_CLAIM_INTERVAL
 
     // optional
     this._store = opts.store
@@ -234,6 +235,17 @@ class Plugin extends BtpPlugin {
         }
       }
 
+      debug('setting claim interval on channel.')
+      this._lastClaimedAmount = new BigNumber(util.xrpToDrops(this._paychan.balance))
+      this._claimIntervalId = setInterval(async () => {
+        if (this._lastClaimedAmount.lessThan(this._bestClaim.amount)) {
+          debug('starting automatic claim. amount=' + this._bestClaim.amount)
+          this._lastClaimedAmount = new BigNumber(this._bestClaim.amount)
+          await this._claimFunds()
+          debug('claimed funds.')
+        }
+      }, this._claimInterval)
+
       debug('loaded best claim of', this._bestClaim)
       this._watcher.watch(this._clientChannel)
     }
@@ -251,6 +263,13 @@ class Plugin extends BtpPlugin {
       await this._writeQueue
     }
 
+    await this._claimFunds()
+
+    clearInterval(this._claimIntervalId)
+    debug('done')
+  }
+
+  async _claimFunds () {
     if (this._bestClaim.amount === '0') return
     if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
 
@@ -271,8 +290,6 @@ class Plugin extends BtpPlugin {
       console.error('WARNING: Error submitting claim: ', resultMessage)
       throw new Error('Could not claim funds: ', resultMessage)
     }
-
-    debug('done')
   }
 
   async _handleData (from, message) {

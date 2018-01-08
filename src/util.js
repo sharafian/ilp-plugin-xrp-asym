@@ -6,6 +6,7 @@ const addressCodec = require('ripple-address-codec')
 
 const INFO_REQUEST_ALL = 2
 const MIN_SETTLE_DELAY = 3600
+const DEFAULT_CLAIM_INTERVAL = 5 * 60 * 1000
 
 const DROPS_PER_XRP = 1000000
 const dropsToXrp = (drops) => new BigNumber(drops).div(DROPS_PER_XRP).toString()
@@ -118,6 +119,7 @@ function encodeChannelProof (channel, account) {
 module.exports = {
   INFO_REQUEST_ALL,
   MIN_SETTLE_DELAY, 
+  DEFAULT_CLAIM_INTERVAL,
   DROPS_PER_XRP,
   dropsToXrp,
   xrpToDrops,

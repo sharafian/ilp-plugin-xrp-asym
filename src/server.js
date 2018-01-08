@@ -44,6 +44,7 @@ class Plugin extends MiniAccountsPlugin {
     this._api = new RippleAPI({ server: this._xrpServer })
     this._watcher = new ChannelWatcher(10 * 60 * 1000, this._api)
     this._bandwidth = opts.bandwidth || 1000
+    this._claimInterval = opts.claimInterval || util.DEFAULT_CLAIM_INTERVAL
 
     this._balances = new StoreWrapper(opts._store)
     this._paychans = new Map()
@@ -51,6 +52,8 @@ class Plugin extends MiniAccountsPlugin {
     this._channelToAccount = new Map()
     this._connections = new Map()
     this._funding = new Map()
+    this._lastClaimedAmounts = new Map()
+    this._claimIntervalIds = new Map()
   }
 
   sendTransfer () {}
@@ -91,6 +94,34 @@ class Plugin extends MiniAccountsPlugin {
       clientChannel,
       address,
       account: from
+    }
+  }
+
+  async _channelClaim (account) {
+    debug('creating claim for claim. account=' + account)
+    const balanceKey = account + ':outgoing_balance'
+    const balance = this._balances.get(balanceKey)
+    const channel = this._balances.get(account + ':client_channel')
+    const encodedClaim = util.encodeClaim(balance.toString(), channel)
+    const keyPairSeed = util.hmac(this._secret, CHANNEL_KEYS + account)
+    const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
+    const signature = nacl.sign.detached(encodedClaim, keyPair.secretKey)
+
+    debug('creating claim tx. account=' + account)
+    const tx = await this._api.preparePaymentChannelClaim(this._address, {
+      balance: util.dropsToXrp(balance.toString()),
+      signature: signature.toString('hex').toUpperCase(),
+      publicKey: 'ED' + Buffer.from(keyPair.publicKey).toString('hex').toUpperCase(),
+      channel
+    })
+
+    debug('signing claim transaction. account=' + account)
+    const signedTx = this._api.sign(tx.txJSON, this._secret)
+
+    debug('submitting claim transaction. tx=', tx, ' account=' + account)
+    const {resultCode, resultMessage} = await this._api.submit(signedTx.signedTransaction)
+    if (resultCode !== 'tesSUCCESS') {
+      console.error('WARNING: Error submitting close: ', resultMessage)
     }
   }
 
@@ -304,6 +335,21 @@ class Plugin extends MiniAccountsPlugin {
       this._channelToAccount.set(channel, account)
       this._balances.set(account + ':channel', channel)
       this._balances.set('channel:' + channel, account)
+
+      // TODO: better cleanup of in-memory fields
+      this._lastClaimedAmounts.set(account, util.xrpToDrops(paychan.balance))
+      this._claimIntervalIds.set(account, setInterval(async () => {
+        const lastClaimedAmount = this._lastClaimedAmounts.get(account)
+        const amount = this._getLastClaim(account).amount
+
+        if (new BigNumber(lastClaimedAmount).lessThan(amount)) {
+          debug('starting automatic claim. amount=' + amount + ' account=' + account)
+          this._lastClaimedAmounts.set(account, amount)
+          await this._channelClaim(account)
+          debug('claimed funds. account=' + account)
+        }
+      }, this._claimInterval))
+
       debug('registered payment channel for', account)
     }
 
@@ -624,6 +670,12 @@ class Plugin extends MiniAccountsPlugin {
 
   _getLastClaim (account) {
     return JSON.parse(this._balances.get(account + ':claim') || '{"amount":"0"}')
+  }
+
+  async _disconnect () {
+    for (const interval of this._claimIntervalIds) {
+      clearInterval(interval)
+    }
   }
 }
 
