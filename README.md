@@ -6,16 +6,35 @@
 const IlpPluginXrpAsym = require('ilp-plugin-xrp-asym')
 
 const serverPlugin = new IlpPluginXrpAsym.Server({
+  // Port on which to listen
   port: 6666,
+
+  // XRP credentials of the server
   address: 'rKzfaLjeVZXasCSU2heTUGw9VhQmFNSd8k',
   secret: 'snHNnoL6S67wNvydcZg9y9bFzPZwG',
+
+  // Rippled server for the server to use
   xrpServer: 'wss://s.altnet.rippletest.net:51233',
-  bandwidth: 1000000, // max unsecured at once
+
+  // Max amount to be unsecured at any one time
+  bandwidth: 1000000,
+
+  // Persistent Key-value store. ILP-Connector will pass
+  // this parameter in automatically.
   _store: new Store()
 })
 
 const clientPlugin = new IlpPluginXrpAsym({
-  server: 'btp+ws://:secret@localhost:6666',
+  // The BTP address of the asymmetric server plugin. The `btp_secret`
+  // in here is hashed to become the account name. Note that if you switch
+  // XRP accounts, you also have to switch `btp_secret`s
+  server: 'btp+ws://:btp_secret@localhost:6666',
+
+  // Rippled server for client use
+  xrpServer: 'wss://s.altnet.rippletest.net:51233'
+
+  // XRP secret. The address can be dynamically determined from this,
+  // or can be specified as a separate option.
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs'
 })
 ```
