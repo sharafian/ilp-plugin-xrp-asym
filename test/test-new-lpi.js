@@ -18,6 +18,7 @@ const serverPlugin = new PluginXrp.Server({
   address: 'r9Ggkrw4VCfRzSqgrkJTeyfZvBvaG9z3hg',
   secret: 'snRHsS3wLzbfeDNSVmtLKjE6sPMws',
   xrpServer: 'wss://s.altnet.rippletest.net:51233',
+  claimInterval: 1000 * 30,
   bandwidth: 1000000,
   _store: new Store(null, 'test.example.'),
   debugHostIldcpInfo: {
@@ -30,7 +31,8 @@ const serverPlugin = new PluginXrp.Server({
 const clientPlugin = new PluginXrp({
   server: 'btp+wss://:secret@localhost:3033',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
-  bandwidth: 1000000
+  bandwidth: 1000000,
+  claimInterval: 1000 * 20,
   // address: 'rsxjtFn93z2M4eMyjFaMFiHwzeH1K9xK3K',
   // xrpServer: 'wss://s.altnet.rippletest.net:51233'
 })
@@ -117,7 +119,7 @@ connect()
   .then(() => run(serverPlugin, clientPlugin))
   //run(serverPlugin, clientPlugin)
   .then(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 5000))
+    await new Promise((resolve) => setTimeout(resolve, 35000))
     await clientPlugin.disconnect()
     await serverPlugin.disconnect()
     process.exit(0)

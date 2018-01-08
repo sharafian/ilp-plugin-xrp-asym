@@ -238,12 +238,7 @@ class Plugin extends BtpPlugin {
       debug('setting claim interval on channel.')
       this._lastClaimedAmount = new BigNumber(util.xrpToDrops(this._paychan.balance))
       this._claimIntervalId = setInterval(async () => {
-        if (this._lastClaimedAmount.lessThan(this._bestClaim.amount)) {
-          debug('starting automatic claim. amount=' + this._bestClaim.amount)
-          this._lastClaimedAmount = new BigNumber(this._bestClaim.amount)
-          await this._claimFunds()
-          debug('claimed funds.')
-        }
+        await this._claimFunds()
       }, this._claimInterval)
 
       debug('loaded best claim of', this._bestClaim)
@@ -272,6 +267,10 @@ class Plugin extends BtpPlugin {
   async _claimFunds () {
     if (this._bestClaim.amount === '0') return
     if (this._bestClaim.amount === util.xrpToDrops(this._paychan.balance)) return
+    if (!this._lastClaimedAmount.lessThan(this._bestClaim.amount)) return
+
+    debug('starting claim. amount=' + this._bestClaim.amount)
+    this._lastClaimedAmount = new BigNumber(this._bestClaim.amount)
 
     debug('creating claim tx')
     const claimTx = await this._api.preparePaymentChannelClaim(this._address, {
@@ -290,6 +289,8 @@ class Plugin extends BtpPlugin {
       console.error('WARNING: Error submitting claim: ', resultMessage)
       throw new Error('Could not claim funds: ', resultMessage)
     }
+
+    debug('claimed funds.')
   }
 
   async _handleData (from, message) {
@@ -387,6 +388,11 @@ class Plugin extends BtpPlugin {
       })
         .then(async () => {
           this._funding = false
+
+          const encodedChannel = util.encodeChannelProof(this._channel, this._account)
+          const channelSignature = nacl.sign
+            .detached(encodedChannel, this._keyPair.secretKey)
+
           // send a 'channel' call in order to refresh details
           await this._call(null, {
             type: BtpPacket.TYPE_MESSAGE,
@@ -395,6 +401,10 @@ class Plugin extends BtpPlugin {
               protocolName: 'channel',
               contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
               data: Buffer.from(this._channel, 'hex')
+            }, {
+              protocolName: 'channel_signature',
+              contentType: BtpPacket.MIME_APPLICATION_OCTET_STREAM,
+              data: Buffer.from(channelSignature)
             }] }
           })
         })

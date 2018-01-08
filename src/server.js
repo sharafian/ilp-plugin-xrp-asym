@@ -99,19 +99,16 @@ class Plugin extends MiniAccountsPlugin {
 
   async _channelClaim (account) {
     debug('creating claim for claim. account=' + account)
-    const balanceKey = account + ':outgoing_balance'
-    const balance = this._balances.get(balanceKey)
-    const channel = this._balances.get(account + ':client_channel')
-    const encodedClaim = util.encodeClaim(balance.toString(), channel)
-    const keyPairSeed = util.hmac(this._secret, CHANNEL_KEYS + account)
-    const keyPair = nacl.sign.keyPair.fromSeed(keyPairSeed)
-    const signature = nacl.sign.detached(encodedClaim, keyPair.secretKey)
+    const balance = this._balances.get(account)
+    const channel = this._balances.get(account + ':channel')
+    const claim = this._getLastClaim(account)
+    const publicKey = this._paychans.get(account).publicKey
 
     debug('creating claim tx. account=' + account)
     const tx = await this._api.preparePaymentChannelClaim(this._address, {
-      balance: util.dropsToXrp(balance.toString()),
-      signature: signature.toString('hex').toUpperCase(),
-      publicKey: 'ED' + Buffer.from(keyPair.publicKey).toString('hex').toUpperCase(),
+      balance: util.dropsToXrp(claim.amount.toString()),
+      signature: claim.signature.toUpperCase(),
+      publicKey,
       channel
     })
 
@@ -188,6 +185,7 @@ class Plugin extends MiniAccountsPlugin {
       this._validatePaychanDetails(paychan)
       this._paychans.set(account, paychan)
       this._channelToAccount.set(existingChannel, account)
+      await this._registerAutoClaim(account)
     }
 
     if (existingClientChannel) {
@@ -336,20 +334,7 @@ class Plugin extends MiniAccountsPlugin {
       this._balances.set(account + ':channel', channel)
       this._balances.set('channel:' + channel, account)
 
-      // TODO: better cleanup of in-memory fields
-      this._lastClaimedAmounts.set(account, util.xrpToDrops(paychan.balance))
-      this._claimIntervalIds.set(account, setInterval(async () => {
-        const lastClaimedAmount = this._lastClaimedAmounts.get(account)
-        const amount = this._getLastClaim(account).amount
-
-        if (new BigNumber(lastClaimedAmount).lessThan(amount)) {
-          debug('starting automatic claim. amount=' + amount + ' account=' + account)
-          this._lastClaimedAmounts.set(account, amount)
-          await this._channelClaim(account)
-          debug('claimed funds. account=' + account)
-        }
-      }, this._claimInterval))
-
+      await this._registerAutoClaim(account)
       debug('registered payment channel for', account)
     }
 
@@ -417,6 +402,30 @@ class Plugin extends MiniAccountsPlugin {
     }
 
     return []
+  }
+
+  async _registerAutoClaim (account) {
+    debug('registering auto-claim. interval=' + this._claimInterval,
+      'account=' + account)
+
+    const paychan = this._paychans.get(account)
+
+    // TODO: better cleanup of in-memory fields
+    // TODO: will a channel update trigger two concurrent intervals?
+    this._lastClaimedAmounts.set(account, util.xrpToDrops(paychan.balance))
+    this._claimIntervalIds.set(account, setInterval(async () => {
+      const lastClaimedAmount = this._lastClaimedAmounts.get(account)
+      const amount = this._getLastClaim(account).amount
+
+      debug('auto-claiming. account=' + account, 'amount=' + amount,
+        'lastClaimedAmount=' + lastClaimedAmount)
+      if (new BigNumber(lastClaimedAmount).lessThan(amount)) {
+        debug('starting automatic claim. amount=' + amount + ' account=' + account)
+        this._lastClaimedAmounts.set(account, amount)
+        await this._channelClaim(account)
+        debug('claimed funds. account=' + account)
+      }
+    }, this._claimInterval))
   }
 
   async _expireData (account, ilpData) {
