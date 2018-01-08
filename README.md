@@ -3,8 +3,19 @@
 > lightweight client
 
 ```js
-const plugin = new IlpPluginXrpClient({
-  server: 'btp+wss://:secret@example.com',
+const IlpPluginXrpAsym = require('ilp-plugin-xrp-asym')
+
+const serverPlugin = new IlpPluginXrpAsym.Server({
+  port: 6666,
+  address: 'rKzfaLjeVZXasCSU2heTUGw9VhQmFNSd8k',
+  secret: 'snHNnoL6S67wNvydcZg9y9bFzPZwG',
+  xrpServer: 'wss://s.altnet.rippletest.net:51233',
+  bandwidth: 1000000, // max unsecured at once
+  _store: new Store()
+})
+
+const clientPlugin = new IlpPluginXrpAsym({
+  server: 'btp+ws://:secret@localhost:6666',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs'
 })
 ```
