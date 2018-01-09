@@ -2,17 +2,19 @@
 
 const ILP = require('ilp')
 const ILDCP = require('ilp-protocol-ildcp')
-const PluginXrp = require('..')
 const IlpPacket = require('ilp-packet')
 const base64url = require('base64url')
 const crypto = require('crypto')
 const Store = require('./redisStore.js')
 
+const PluginXrpAsymServer = require('ilp-plugin-xrp-asym-server')
+const PluginXrpAsymClient = require('ilp-plugin-xrp-asym-client')
+
 process.on('unhandledRejection', (e) => {
   console.log('UNHANDLED REJECTION', e)
 })
 
-const serverPlugin = new PluginXrp.Server({
+const serverPlugin = new PluginXrpAsymServer({
   prefix: 'test.example.',
   port: 3033,
   address: 'r9Ggkrw4VCfRzSqgrkJTeyfZvBvaG9z3hg',
@@ -28,7 +30,7 @@ const serverPlugin = new PluginXrp.Server({
   }
 })
 
-const clientPlugin = new PluginXrp({
+const clientPlugin = new PluginXrpAsymClient({
   server: 'btp+wss://:secret@localhost:3033',
   secret: 'ss1oM64ccuJuX9utz5pdPRuu5QKMs',
   bandwidth: 1000000,

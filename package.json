@@ -1,0 +1,29 @@
+{
+  "name": "ilp-plugin-xrp-asym",
+  "version": "0.0.1",
+  "description": "Moved to:",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "DEBUG=* node test/test-new-lpi.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sharafian/ilp-plugin-xrp-asym.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sharafian/ilp-plugin-xrp-asym/issues"
+  },
+  "homepage": "https://github.com/sharafian/ilp-plugin-xrp-asym#readme",
+  "dependencies": {
+    "ilp": "github:interledgerjs/ilp#refactor/st-lpi2",
+    "ilp-plugin-xrp-asym-client": "github:interledgerjs/ilp-plugin-xrp-asym-client",
+    "ilp-plugin-xrp-asym-server": "github:interledgerjs/ilp-plugin-xrp-asym-server",
+    "ioredis": "^3.2.2",
+    "lodash": "^4.17.4"
+  }
+}
